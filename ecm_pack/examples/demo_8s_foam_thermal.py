@@ -35,21 +35,22 @@ from ecm_pack.thermal3d import CellThermalModel
 def main():
     # ────── 工况参数（对齐真实测试条件）──────
     n_cells = 8
-    I_load = 314.0               # 总负载 1C [A]（真实测试级别）
-    t_total = 7200.0             # 2 小时（匹配用户真实数据时间跨度）
+    I_load = 200.0               # 总负载 [A]（用户确认：200A）
+    t_total = 7200.0             # 2 小时（约2h后电压截止自然停机）
     dt = 2.0
     n_steps = int(t_total / dt)  # 3600 步
 
     # ────── 泡棉参数 ──────
-    k_foam = 0.04                # EVA/PE 泡棉 [W/(m·K)]
-    d_foam = 0.001               # 1 mm
-    R_th_foam = d_foam / k_foam  # 0.025 K·m²/W
+    k_foam = 0.035               # 压缩态 EVA 泡棉 [W/(m·K)]（比名义值差）
+    d_foam = 0.0013              # 压缩后 ~1.3mm（含接触间隙）
+    R_th_foam = d_foam / k_foam  # ≈ 0.037 K·m²/W (~370 K·cm²/W)
     # 两个接触面
     A_row = 0.174 * 0.207        # Y方向/XZ面 = 0.03602 m²
     A_col = 0.0717 * 0.207       # X方向/YZ面 = 0.01484 m²
-    G_row = A_row / R_th_foam    # ≈ 1.44 W/K
-    G_col = A_col / R_th_foam    # ≈ 0.59 W/K
-    print(f"泡棉: 1mm EVA k={k_foam}W/mK → R_th={R_th_foam:.4f} K·m²/W ({R_th_foam*1e4:.0f} K·cm²/W)")
+    G_row = A_row / R_th_foam    # ≈ 0.97 W/K
+    G_col = A_col / R_th_foam    # ≈ 0.40 W/K
+    print(f"泡棉: d≈{d_foam*1000:.1f}mm, k≈{k_foam}W/mK → R_th={R_th_foam:.4f} K·m²/W "
+          f"({R_th_foam*1e4:.0f} K·cm²/W)")
     print(f"  行内(Y) A={A_row*1e4:.0f}cm² → G={G_row:.3f} W/K")
     print(f"  列间(X) A={A_col*1e4:.0f}cm² → G={G_col:.3f} W/K")
 
@@ -62,8 +63,7 @@ def main():
 
     # ────── 热网络 ──────
     C_th_cell = 2300.0 * 1000.0 * (0.174 * 0.0717 * 0.207)  # 5941 J/K
-    # 模组外壳封装，等效对流远低于裸芯——此处用等效值拟合真实模组数据
-    h_conv = 18.0  # 等效模组壳层对流 [W/(m²·K)]
+    h_conv = 6.0   # 内芯等效 h（模组内部温和换热）[W/(m²·K)]
 
     # 每芯暴露面积（精确计算）
     # 面面积: A_XZ=Lx·Lz=0.03602, A_YZ=Ly·Lz=0.01484, A_XY=Lx·Ly=0.01248
@@ -74,13 +74,15 @@ def main():
     A_exp_edge = A_yz + 2*A_xy             # 0.03980 m²
 
     h_per_cell = np.zeros(n_cells)
-    h_per_cell[[0, 3, 4, 7]] = h_conv * A_exp_corner   # 角芯 ≈ 0.379 W/K
-    h_per_cell[[1, 2, 5, 6]] = h_conv * A_exp_edge     # 边芯 ≈ 0.199 W/K
+    h_inner = h_conv              # 内部芯自然堆叠
+    h_outer = 35.0                # 角芯直接对模块外壳（等效强迫风冷）
+    h_per_cell[[0, 3, 4, 7]] = h_outer * A_exp_corner     # 角芯 ≈ 1.90 W/K
+    h_per_cell[[1, 2, 5, 6]] = h_inner * A_exp_edge       # 边芯 ≈ 0.20 W/K
 
     print(f"\n  角芯暴露面={A_exp_corner*1e4:.0f}cm² h·A={h_per_cell[0]:.3f}W/K "
-          f"(bat1,4,5,8)")
+          f"(bat1,4,5,8, 模块壳直接冷却)")
     print(f"  边芯暴露面={A_exp_edge*1e4:.0f}cm² h·A={h_per_cell[1]:.3f}W/K "
-          f"(bat2,3,6,7)")
+          f"(bat2,3,6,7, 内部靠泡棉导热到角芯)")
 
     # 10 条泡棉层间热阻
     # 行内(Y方向, XZ面): bat1-bat2, bat2-bat3, bat3-bat4, bat5-bat6, bat6-bat7, bat7-bat8
@@ -113,7 +115,7 @@ def main():
     # ────── 报告 ──────
     print()
     print("=" * 65)
-    print(f" 8S + 全泡棉(10面)  1C=314A / 2h  模组等效冷却(h={h_conv})")
+    print(f" 8S + 全泡棉(10面)  200A 2h  角芯强散热(h={h_outer}) vs 内芯弱散热(h={h_inner})")
     print("=" * 65)
     for idx in range(n_cells):
         pos = "Corner" if idx in [0,3,4,7] else " Edge "
@@ -137,7 +139,7 @@ def main():
         lbl = f"bat{idx+1}({tpos})"
         ax1.plot(time_arr/60, T_cells[:, idx], color=colors[idx], lw=1.2, label=lbl)
     ax1.set(ylabel="温度 [K]",
-            title=f"8S 电芯温度演变（1C=314A 2h 模组等效冷却 h={h_conv}） 整包ΔT={dT_pack:.3f}K")
+            title=f"8S 电芯温度演变（200A 2h 闷罐模组 h={h_conv}） 整包ΔT={dT_pack:.2f}K")
     ax1.legend(ncol=4, fontsize=7, loc="upper left")
     ax1.grid(alpha=0.3)
     ax2.plot(time_arr/60, Vt, color="#1f77b4", lw=1.6)
