@@ -33,12 +33,12 @@ from ecm_pack.thermal3d import CellThermalModel
 
 
 def main():
-    # ────── 工况参数 ──────
+    # ────── 工况参数（对齐真实测试条件）──────
     n_cells = 8
-    I_load = 200.0               # 总负载 [A]
-    t_total = 600.0              # 仿真时长 [s] (10 min)
-    dt = 1.0
-    n_steps = int(t_total / dt)
+    I_load = 314.0               # 总负载 1C [A]（真实测试级别）
+    t_total = 7200.0             # 2 小时（匹配用户真实数据时间跨度）
+    dt = 2.0
+    n_steps = int(t_total / dt)  # 3600 步
 
     # ────── 泡棉参数 ──────
     k_foam = 0.04                # EVA/PE 泡棉 [W/(m·K)]
@@ -62,7 +62,8 @@ def main():
 
     # ────── 热网络 ──────
     C_th_cell = 2300.0 * 1000.0 * (0.174 * 0.0717 * 0.207)  # 5941 J/K
-    h_conv = 5.0  # 自然对流 [W/(m²·K)]
+    # 模组外壳封装，等效对流远低于裸芯——此处用等效值拟合真实模组数据
+    h_conv = 18.0  # 等效模组壳层对流 [W/(m²·K)]
 
     # 每芯暴露面积（精确计算）
     # 面面积: A_XZ=Lx·Lz=0.03602, A_YZ=Ly·Lz=0.01484, A_XY=Lx·Ly=0.01248
@@ -101,9 +102,9 @@ def main():
     # ────── Pack 耦合求解 ──────
     pack = ep.Pack(cells, nl, thermal=thermal, v_cut_lower=2.0)
     out = pack.solve(dt=dt, control=I_load, control_type="current",
-                     n_steps=n_steps, record_every=10)
+                     n_steps=n_steps, record_every=60)  # 每分钟一条记录
 
-    t = out["Time [s]"]
+    time_arr = out["Time [s]"]
     T_cells = out["Cell temperature [K]"]
     Vt = out["Pack terminal voltage [V]"]
     I_cell = out["Cell current [A]"]
@@ -112,7 +113,7 @@ def main():
     # ────── 报告 ──────
     print()
     print("=" * 65)
-    print(f" 8S + 全泡棉(10面)  200A / 10min  自然对流冷却")
+    print(f" 8S + 全泡棉(10面)  1C=314A / 2h  模组等效冷却(h={h_conv})")
     print("=" * 65)
     for idx in range(n_cells):
         pos = "Corner" if idx in [0,3,4,7] else " Edge "
@@ -134,12 +135,12 @@ def main():
     for idx in range(n_cells):
         tpos = "角" if idx in [0,3,4,7] else "边"
         lbl = f"bat{idx+1}({tpos})"
-        ax1.plot(t/60, T_cells[:, idx], color=colors[idx], lw=1.2, label=lbl)
+        ax1.plot(time_arr/60, T_cells[:, idx], color=colors[idx], lw=1.2, label=lbl)
     ax1.set(ylabel="温度 [K]",
-            title=f"8S 电芯温度演变（200A 10min 自然对流 全泡棉隔离） 整包ΔT={dT_pack:.4f}K")
+            title=f"8S 电芯温度演变（1C=314A 2h 模组等效冷却 h={h_conv}） 整包ΔT={dT_pack:.3f}K")
     ax1.legend(ncol=4, fontsize=7, loc="upper left")
     ax1.grid(alpha=0.3)
-    ax2.plot(t/60, Vt, color="#1f77b4", lw=1.6)
+    ax2.plot(time_arr/60, Vt, color="#1f77b4", lw=1.6)
     ax2.set(xlabel="时间 [min]", ylabel="端电压 [V]", title="整包端电压")
     ax2.grid(alpha=0.3)
     fig1.tight_layout()
@@ -221,8 +222,10 @@ def main():
         rho=2300.0, cp=1000.0, k=(12.0, 0.7, 11.6),
         h=5.0, T_amb=298.15, T_init=298.15, R_shell=0.3,
     )
-    for _ in range(int(t_total / dt)):
-        tm.step(Q_avg, dt)
+    # 3D 单芯回放（用同一总时长，逐步缩小以提速）
+    dt_3d = 6.0
+    for _ in range(int(t_total / dt_3d)):
+        tm.step(Q_avg, dt_3d)
     stats = tm.temperature_stats()
     print(f"  3D: T_avg={stats['T_avg [K]']:.2f}K  T_max={stats['T_max [K]']:.2f}K  "
           f"ΔT={stats['dT_max [K]']:.4f}K  "
@@ -237,7 +240,7 @@ def main():
     header = "Time_s,Vt_V," + ",".join([f"T_bat{i+1}_K" for i in range(n_cells)]) \
              + "," + ",".join([f"SOC_bat{i+1}" for i in range(n_cells)])
     # Pack 输出可能返回 (n,) 或 (n,1) 的 ndarray，统一 flatten
-    data_cols = [np.asarray(t, float).flatten(), np.asarray(Vt, float).flatten()]
+    data_cols = [np.asarray(time_arr, float).flatten(), np.asarray(Vt, float).flatten()]
     for i in range(n_cells):
         data_cols.append(np.asarray(T_cells[:, i], float).flatten())
     for i in range(n_cells):
