@@ -41,18 +41,19 @@ def main():
     n_steps = int(t_total / dt)  # 3600 步
 
     # ────── 泡棉参数 ──────
-    k_foam = 0.035               # 压缩态 EVA 泡棉 [W/(m·K)]（比名义值差）
-    d_foam = 0.0013              # 压缩后 ~1.3mm（含接触间隙）
-    R_th_foam = d_foam / k_foam  # ≈ 0.037 K·m²/W (~370 K·cm²/W)
-    # 两个接触面
-    A_row = 0.174 * 0.207        # Y方向/XZ面 = 0.03602 m²
-    A_col = 0.0717 * 0.207       # X方向/YZ面 = 0.01484 m²
-    G_row = A_row / R_th_foam    # ≈ 0.97 W/K
-    G_col = A_col / R_th_foam    # ≈ 0.40 W/K
+    k_foam = 0.035               # 压缩态 EVA 泡棉 [W/(m·K)]
+    d_foam = 0.0013              # 压缩后 ~1.3mm
+    R_th_foam = d_foam / k_foam
+    # 大面 (174×207): bat1-bat5 跨行背靠背 — 4 条
+    A_large = 0.174 * 0.207       # 0.03602 m²
+    # 厚度面 (71.7×207): bat1-bat2 同行项链 — 6 条
+    A_thin = 0.0717 * 0.207       # 0.01484 m²
+    G_large = A_large / R_th_foam
+    G_thin = A_thin / R_th_foam
     print(f"泡棉: d≈{d_foam*1000:.1f}mm, k≈{k_foam}W/mK → R_th={R_th_foam:.4f} K·m²/W "
           f"({R_th_foam*1e4:.0f} K·cm²/W)")
-    print(f"  行内(Y) A={A_row*1e4:.0f}cm² → G={G_row:.3f} W/K")
-    print(f"  列间(X) A={A_col*1e4:.0f}cm² → G={G_col:.3f} W/K")
+    print(f"  跨行大面 bat1↔bat5 A={A_large*1e4:.0f}cm² → G={G_large:.3f} W/K (4条)")
+    print(f"  同行厚度 bat1↔bat2 A={A_thin*1e4:.0f}cm² → G={G_thin:.3f} W/K (6条)")
 
     # ────── 8 颗 314Ah 电芯 ──────
     cells = [ep.ECMCell(ep.cell_314ah_spec(soc_init=1.0, T_init=298.15))
@@ -65,35 +66,35 @@ def main():
     C_th_cell = 2300.0 * 1000.0 * (0.174 * 0.0717 * 0.207)  # 5941 J/K
     h_conv = 6.0   # 内芯等效 h（模组内部温和换热）[W/(m²·K)]
 
-    # 每芯暴露面积（精确计算）
-    # 面面积: A_XZ=Lx·Lz=0.03602, A_YZ=Ly·Lz=0.01484, A_XY=Lx·Ly=0.01248
-    A_xz, A_yz, A_xy = 0.174*0.207, 0.0717*0.207, 0.174*0.0717
-    # 角芯 (bat1,4,5,8): 4 面暴露 (x端+y端+z0+z1) → A_xz+A_yz+2*A_xy = 0.07582
-    A_exp_corner = A_xz + A_yz + 2*A_xy   # 0.07582 m²
-    # 边芯 (bat2,3,6,7): 3 面暴露 (x端+z0+z1) → A_yz+2*A_xy = 0.03980
-    A_exp_edge = A_yz + 2*A_xy             # 0.03980 m²
+    # 每芯暴露面积 — 正确堆叠: X=4芯(174mm宽), Y=2芯(71.7mm深), Z=207mm高
+    # 面面积: A_thin_YZ=0.01484, A_large_XZ=0.03602, A_top_XY=0.01248
+    At = 0.0717*0.207    # 厚度面 71.7×207 (bat1↔bat2的项链面)
+    Al = 0.174*0.207     # 大面 174×207 (bat1↔bat5的背靠背面)
+    A_top = 0.174*0.0717 # 顶/底面 (防爆阀所在面)
+    # 角芯(bat1,4,5,8): x端+ y端+ 顶+底 — 4 暴露面
+    A_exp_corner = At + Al + 2*A_top  # 0.07582 m²
+    # 边芯(bat2,3,6,7): y端+顶+底 — 3 暴露面 (x面被左右邻居覆盖)
+    A_exp_edge = Al + 2*A_top          # 0.06096 m²
 
     h_per_cell = np.zeros(n_cells)
-    h_inner = h_conv              # 内部芯自然堆叠
-    h_outer = 35.0                # 角芯直接对模块外壳（等效强迫风冷）
-    h_per_cell[[0, 3, 4, 7]] = h_outer * A_exp_corner     # 角芯 ≈ 1.90 W/K
-    h_per_cell[[1, 2, 5, 6]] = h_inner * A_exp_edge       # 边芯 ≈ 0.20 W/K
+    h_inner = h_conv
+    h_outer = 30.0              # 角芯直接见模块壳
+    h_per_cell[[0, 3, 4, 7]] = h_outer * A_exp_corner     # 角芯
+    h_per_cell[[1, 2, 5, 6]] = h_inner * A_exp_edge       # 边芯
 
     print(f"\n  角芯暴露面={A_exp_corner*1e4:.0f}cm² h·A={h_per_cell[0]:.3f}W/K "
-          f"(bat1,4,5,8, 模块壳直接冷却)")
+          f"(bat1,4,5,8)")
     print(f"  边芯暴露面={A_exp_edge*1e4:.0f}cm² h·A={h_per_cell[1]:.3f}W/K "
-          f"(bat2,3,6,7, 内部靠泡棉导热到角芯)")
+          f"(bat2,3,6,7)")
 
-    # 10 条泡棉层间热阻
-    # 行内(Y方向, XZ面): bat1-bat2, bat2-bat3, bat3-bat4, bat5-bat6, bat6-bat7, bat7-bat8
-    # 列间(X方向, YZ面): bat1-bat5, bat2-bat6, bat3-bat7, bat4-bat8
+    # 10 条泡棉: 6 条同行厚度面 (A_thin) + 4 条跨行大面 (A_large)
     iface = [
-        (0, 1, R_th_foam, A_row),  (1, 2, R_th_foam, A_row),
-        (2, 3, R_th_foam, A_row),
-        (4, 5, R_th_foam, A_row),  (5, 6, R_th_foam, A_row),
-        (6, 7, R_th_foam, A_row),
-        (0, 4, R_th_foam, A_col),  (1, 5, R_th_foam, A_col),
-        (2, 6, R_th_foam, A_col),  (3, 7, R_th_foam, A_col),
+        (0, 1, R_th_foam, A_thin),  (1, 2, R_th_foam, A_thin),
+        (2, 3, R_th_foam, A_thin),  # row0 X方向
+        (4, 5, R_th_foam, A_thin),  (5, 6, R_th_foam, A_thin),
+        (6, 7, R_th_foam, A_thin),  # row1 X方向
+        (0, 4, R_th_foam, A_large), (1, 5, R_th_foam, A_large),
+        (2, 6, R_th_foam, A_large), (3, 7, R_th_foam, A_large),  # Y方向
     ]
 
     thermal = ep.ThermalNetwork(
@@ -115,12 +116,11 @@ def main():
     # ────── 报告 ──────
     print()
     print("=" * 65)
-    print(f" 8S + 全泡棉(10面)  200A 2h  角芯强散热(h={h_outer}) vs 内芯弱散热(h={h_inner})")
+    print(f" 8S + 全泡棉(10面)  200A 2h  大面背靠背+厚度项链  h_outer={h_outer}")
     print("=" * 65)
     for idx in range(n_cells):
-        pos = "Corner" if idx in [0,3,4,7] else " Edge "
-        bat_num = idx + 1
-        print(f"  bat{bat_num} ({pos})  "
+        role = "角" if idx in [0, 3, 4, 7] else "边"
+        print(f"  bat{idx+1} ({role})  "
               f"T_final={T_cells[-1,idx]:.2f}K  "
               f"ΔT={T_cells[-1,idx]-T_cells[0,idx]:.3f}K  "
               f"SoC={soc[-1,idx]:.4f}")
@@ -135,8 +135,8 @@ def main():
     fig1, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, 6))
     colors = plt.cm.tab10(np.linspace(0, 1, n_cells))
     for idx in range(n_cells):
-        tpos = "角" if idx in [0,3,4,7] else "边"
-        lbl = f"bat{idx+1}({tpos})"
+        role = "角" if idx in [0,3,4,7] else "边"
+        lbl = f"bat{idx+1}({role})"
         ax1.plot(time_arr/60, T_cells[:, idx], color=colors[idx], lw=1.2, label=lbl)
     ax1.set(ylabel="温度 [K]",
             title=f"8S 电芯温度演变（200A 2h 闷罐模组 h={h_conv}） 整包ΔT={dT_pack:.2f}K")
@@ -201,8 +201,8 @@ def main():
                  [pos_2d[pair[0]][1], pos_2d[pair[1]][1]],
                  "red", lw=1.8, ls="--", alpha=0.7)
     ax4.set(xlim=(-0.7, 3.7), ylim=(1.5, 3.7), xticks=[], yticks=[])
-    ax4.set_title(f"2×4 全泡棉热网络  R_th={R_th_foam*1e4:.0f} K·cm²/W  "
-                  f"G_row={G_row:.1f}W/K  G_col={G_col:.2f}W/K", fontsize=11)
+    ax4.set_title(f"2×4 大面背靠背+厚度项链  泡棉R_th={R_th_foam*1e4:.0f} K·cm²/W  "
+                  f"G_large={G_large:.1f}W/K G_thin={G_thin:.2f}W/K", fontsize=11)
     ax4.text(1.5, 1.65, "─ 行内Y向 (XZ面 A=360cm²)  ── 列间X向 (YZ面 A=148cm²)",
              ha="center", fontsize=8, color="gray")
     ax4.set_aspect("equal")
@@ -269,111 +269,103 @@ def main():
 
 def _draw_pack_3d(T_vals, save_path, cell_L=0.174, cell_W=0.0717, cell_H=0.207,
                   gap_X=0.001, gap_Y=0.001, T_amb=298.15):
-    """绘制 2×4 电池包三维图——大面(174×207)背靠背堆叠。
+    """绘制 2×4 电池包三维图 —— bat1↔bat5 大面背靠背, bat1↔bat2 厚度面项链, 防爆阀朝上。
 
-    物理布局:
-      - Z 方向(垂直): 4 芯堆叠 每芯厚度 71.7mm + 1mm 泡棉 = 290mm 高
-        → 大面(174×207, X-Y平面) 相邻互贴 (背靠背)
-      - X 方向(水平宽): 2 行 × 174mm = 350mm
-      - Y 方向(水平深): 207mm
-      - 防爆阀: 每芯的 XZ 侧边(174×71.7)顶部向上, 面向自由空间
+    X: 4 芯 × 174mm (同行厚度面相贴)
+    Y: 2 芯 × 71.7mm (跨行大面背靠背)
+    Z: 207mm 高 → 防爆阀在顶面(174×71.7)
     """
     from mpl_toolkits.mplot3d.art3d import Poly3DCollection
     import matplotlib.patches as mpatches
 
     T = np.asarray(T_vals, float).ravel()
-    n_rows, n_cols = 2, 4     # 2 行横排 (X), 4 层竖叠 (Z)
+    nX, nY = 4, 2   # 4 列宽, 2 行深
     T_rise = T - T_amb
 
-    # 尺寸: X 宽(174), Y 深(207), Z 堆叠厚(71.7)
-    cX, cY, cZ = cell_L, cell_H, cell_W  # 174, 207, 71.7
-    stack_pitch = cZ + gap_Y
+    cX, cY, cZ = cell_L, cell_W, cell_H  # 174, 71.7, 207
+    pitch_X = cX + gap_X
+    pitch_Y = cY + gap_Y
 
-    fig = plt.figure(figsize=(14, 9))
+    fig = plt.figure(figsize=(15, 9))
     ax = fig.add_subplot(111, projection='3d')
     ax.set_proj_type('ortho')
     cmap = plt.cm.coolwarm
     norm = plt.Normalize(vmin=max(T_rise.min(), 0), vmax=T_rise.max() + 0.1)
-    ax.view_init(elev=24, azim=-48)
+    ax.view_init(elev=25, azim=-55)
 
-    offset_X = -((n_rows-1) * (cX + gap_X) + cX) / 2
-    offset_Z = 0.0  # 堆叠从 Z=0 开始
+    offset_X = -((nX-1) * pitch_X + cX) / 2
+    offset_Y = -((nY-1) * pitch_Y + cY) / 2
 
-    for row in range(n_rows):
-        for col in range(n_cols):
-            idx = row * n_cols + col
-            x0 = offset_X + row * (cX + gap_X)
-            y0 = 0.0
-            z0 = offset_Z + col * stack_pitch
+    for ix in range(nX):
+        for iy in range(nY):
+            # bat numbering: ix=0 (bat1, bat5), ix=1 (bat2, bat6), etc.
+            #               iy=0 → row0(bat1-4), iy=1 → row1(bat5-8)
+            idx = iy * nX + ix   # bat1(ix=0,iy=0), bat5(ix=0,iy=1)
+
+            x0 = offset_X + ix * pitch_X
+            y0 = offset_Y + iy * pitch_Y
+            z0 = 0.0
 
             tr = T_rise[idx]
             face_color = cmap(norm(tr))
 
-            # 8 顶点: (宽X, 深Y, 堆叠Z)
             p = np.array([
-                [x0,       y0,       z0],          # 0
-                [x0 + cX,  y0,       z0],          # 1
-                [x0 + cX,  y0 + cY,  z0],          # 2
-                [x0,       y0 + cY,  z0],          # 3
-                [x0,       y0,       z0 + cZ],     # 4
-                [x0 + cX,  y0,       z0 + cZ],     # 5
-                [x0 + cX,  y0 + cY,  z0 + cZ],     # 6
-                [x0,       y0 + cY,  z0 + cZ],     # 7
+                [x0,       y0,       z0],
+                [x0 + cX,  y0,       z0],
+                [x0 + cX,  y0 + cY,  z0],
+                [x0,       y0 + cY,  z0],
+                [x0,       y0,       z0 + cZ],
+                [x0 + cX,  y0,       z0 + cZ],
+                [x0 + cX,  y0 + cY,  z0 + cZ],
+                [x0,       y0 + cY,  z0 + cZ],
             ])
 
-            # 大面 (X-Y, 174×207) — 上下互贴 = 背靠背堆叠
-            large = [
-                [p[0], p[1], p[2], p[3]],   # 底面(z0)
-                [p[4], p[5], p[6], p[7]],   # 顶面(z0+cZ)
+            # 所有 6 个面
+            faces = [
+                [p[0], p[1], p[2], p[3]],  # 底面
+                [p[4], p[5], p[6], p[7]],  # 顶面 (防爆阀在此)
+                [p[0], p[1], p[5], p[4]],  # 前(Y0) — 厚度面 174×207 if cy=71.7, cz=207...
+                [p[2], p[3], p[7], p[6]],  # 后(Y1)
+                [p[0], p[3], p[7], p[4]],  # 左(X0)
+                [p[1], p[2], p[6], p[5]],  # 右(X1)
             ]
-            # 小面 (厚度面)
-            thin = [
-                [p[0], p[1], p[5], p[4]],   # 前面 y=0
-                [p[2], p[3], p[7], p[6]],   # 后面 y=cY
-                [p[0], p[3], p[7], p[4]],   # 左面 x=x0
-                [p[1], p[2], p[6], p[5]],   # 右面 x=x0+cX
-            ]
+            poly = Poly3DCollection(faces, alpha=0.80, linewidth=0.5,
+                                    edgecolor='#333', facecolor=face_color)
+            ax.add_collection3d(poly)
 
-            poly_large = Poly3DCollection(large, alpha=0.72, linewidth=0.6,
-                                          edgecolor='#333', facecolor=face_color)
-            ax.add_collection3d(poly_large)
-            poly_thin = Poly3DCollection(thin, alpha=0.82, linewidth=0.6,
-                                         edgecolor='#333', facecolor=face_color)
-            ax.add_collection3d(poly_thin)
+            # ── 防爆阀: 顶面(Z=cZ)正中央 ──
+            vx_center = x0 + cX / 2
+            vy_center = y0 + cY / 2
+            vz_top = z0 + cZ
 
-            # ── 防爆阀: XZ 侧边 (174×71.7) 前立面 Y=0 的顶部 ──
-            vx_center = x0 + cX * 0.55   # 偏右侧
-            vz_center = z0 + cZ * 0.65   # 偏上方
-            vy_face = y0                  # Y=0 前立面
-
-            valve_r = 0.009
-            valve_protrude = 0.006
-            segs = 16
+            valve_r = 0.014  # 14mm 半径
+            valve_h = 0.008  # 突起 8mm
+            segs = 20
             theta = np.linspace(0, 2*np.pi, segs+1)
             th_x = vx_center + valve_r * np.cos(theta)
-            th_z = vz_center + valve_r * np.sin(theta)
-            vy_inner = np.full_like(th_x, vy_face)
-            vy_outer = np.full_like(th_x, vy_face - valve_protrude)
+            th_y = vy_center + valve_r * np.sin(theta)
+            z_base = np.full_like(th_x, vz_top)
+            z_peak = np.full_like(th_x, vz_top + valve_h)
 
             for i in range(segs):
                 ax.add_collection3d(Poly3DCollection(
-                    [[(th_x[i],   vy_inner[i],  th_z[i]),
-                      (th_x[i+1], vy_inner[i+1],th_z[i+1]),
-                      (th_x[i+1], vy_outer[i+1],th_z[i+1]),
-                      (th_x[i],   vy_outer[i],  th_z[i])]],
+                    [[(th_x[i],   th_y[i],   z_base[i]),
+                      (th_x[i+1], th_y[i+1], z_base[i+1]),
+                      (th_x[i+1], th_y[i+1], z_peak[i+1]),
+                      (th_x[i],   th_y[i],   z_peak[i])]],
                     alpha=0.95, facecolor='#cc2222', edgecolor='#770000',
-                    linewidth=0.5))
+                    linewidth=0.4))
             for i in range(1, segs):
                 ax.add_collection3d(Poly3DCollection(
-                    [[(th_x[0], vy_outer[0], th_z[0]),
-                      (th_x[i], vy_outer[i], th_z[i]),
-                      (th_x[i+1], vy_outer[i+1], th_z[i+1])]],
+                    [[(th_x[0], th_y[0], z_peak[0]),
+                      (th_x[i], th_y[i], z_peak[i]),
+                      (th_x[i+1], th_y[i+1], z_peak[i+1])]],
                     alpha=1.0, facecolor='#dd3333', edgecolor='#770000',
                     linewidth=0.3))
 
             # 编号
-            ax.text(x0 + cX/2, y0 + cY + 0.005, z0 + cZ/2,
-                    f'bat{idx+1}', ha='center', va='center',
+            ax.text(x0 + cX/2, y0 + cY/2, vz_top + valve_h + 0.004,
+                    f'bat{idx+1}', ha='center', va='bottom',
                     fontsize=8, fontweight='bold')
 
     sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
@@ -381,30 +373,30 @@ def _draw_pack_3d(T_vals, save_path, cell_L=0.174, cell_W=0.0717, cell_H=0.207,
     cbar = fig.colorbar(sm, ax=ax, shrink=0.55, pad=0.07)
     cbar.set_label('温升 ΔT [K]', fontsize=10)
 
-    ax.set_xlabel('X (宽度) [m]', fontsize=9)
-    ax.set_ylabel('Y (深度) [m]', fontsize=9)
-    ax.set_zlabel('Z (堆叠方向) [m]', fontsize=9)
+    ax.set_xlabel('X (4芯宽=174mm×4+泡棉) [m]', fontsize=9)
+    ax.set_ylabel('Y (2芯深=71.7mm×2+泡棉) [m]', fontsize=9)
+    ax.set_zlabel('Z (高=207mm) [m]', fontsize=9)
 
-    x_span = cX * n_rows + gap_X * (n_rows-1)
-    z_span = cZ * n_cols + gap_Y * (n_cols-1)
+    x_span = nX * cX + (nX-1) * gap_X
+    y_span = nY * cY + (nY-1) * gap_Y
     pad = 0.03
     ax.set_xlim(offset_X - pad, offset_X + x_span + pad)
-    ax.set_ylim(-pad, cY + pad * 3)
-    ax.set_zlim(-pad, z_span + pad * 3)
+    ax.set_ylim(offset_Y - pad, offset_Y + y_span + pad)
+    ax.set_zlim(-pad, cZ + 0.06)
 
     ax.grid(True, alpha=0.3)
     for pn in ('xaxis', 'yaxis', 'zaxis'):
         getattr(ax, pn).pane.fill = False
 
     ax.legend(handles=[
-        mpatches.Patch(color='#cc2222', label='防爆阀 (前立面 XZ)'),
+        mpatches.Patch(color='#cc2222', label='防爆阀 (顶面)'),
         mpatches.Patch(color='#5a8ac9', alpha=0.8, label='电芯壳 (按ΔT着色)'),
     ], loc='upper left', fontsize=9, framealpha=0.95)
 
     Tmn, Tmx = T_rise.min(), T_rise.max()
-    ax.set_title(f'8S 电池包 · 2×4 大面背靠背堆叠 · 末态温度场\n'
+    ax.set_title(f'8S 电池包 · 大面背靠背 + 厚度面项链 · 末态温度场\n'
                  f'T_amb={T_amb:.0f}K  ΔT {Tmn:.1f}~{Tmx:.1f}K  '
-                 f'(4 层竖叠, 内芯积热, 角芯散热)',
+                 f'防爆阀朝上(Z+)',
                  fontsize=12, fontweight='bold')
 
     fig.tight_layout(rect=[0, 0, 0.95, 1])
