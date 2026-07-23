@@ -1,59 +1,70 @@
 # thermal3d.py
-# 三维电芯热模型：支持填入电芯长宽高，内部用有限体积法(FVM)离散化。
+# 电芯多维热模型：支持 1D / 2D / 3D 切换，填入电芯长宽高与各向异性热物性。
 #
 # 物理模型：
 #   ρ·cp · ∂T/∂t = ∇·(k·∇T) + q_vol
 #
-# 其中 q_vol [W/m³] 为电芯内部体积产热率（来自 ECM 的 heat()/体积）。
-# 边界条件：电芯六个面与外界对流换热 h [W/(m²·K)]，环境温度 T_amb。
+# 其中 q_vol [W/m³] 为体积产热率（来自 ECM 的 heat()/体积）。
+# 边界条件：所有暴露面与外界对流换热 h [W/(m²·K)]，环境温度 T_amb。
+#
+# 维度切换：
+#   dim=1 : 仅沿 X(宽度) 方向求解，Y/Z 方向绝热（侧面无限大近似）
+#   dim=2 : 在 X-Y 平面求解，Z 方向绝热
+#   dim=3 : 三个方向完整求解
 #
 # 数值方法：
-#   - 结构化均匀网格 (nx × ny × nz)，有限体积法离散；
+#   - 结构化均匀网格，有限体积法(FVM)离散；
 #   - 隐式欧拉时间推进，对时间步长无条件稳定；
-#   - 三维扩散用 7 点拉普拉斯算子（中心 + 6 邻居）；
-#   - 大型稀疏线性方程组用 scipy.sparse 求解。
-#
-# 这是对 PyBaMM "双集总(电芯+夹具)" 思想的升级：直接在三维空间求解
-# 温度场，可获得电芯内部温度分布（热点、温度梯度），满足大容量电芯
-# （如 314Ah）对热设计的工程需求。
+#   - 用 scipy.sparse 求解大型稀疏线性方程组。
 import numpy as np
-from scipy.sparse import csr_matrix, eye as speye
+from scipy.sparse import csr_matrix
 from scipy.sparse.linalg import spsolve
 
 
-class Cell3DThermal:
+class CellThermalModel:
     """
-    单个电芯的三维热模型。
+    单个电芯的多维热模型（1D/2D/3D 可切换）。
 
     参数
     ----
     Lx, Ly, Lz : float [m]
-        电芯几何尺寸（长 × 宽 × 高）。
+        电芯几何尺寸。约定：X=宽度, Y=厚度, Z=高度。
+    dim : int (1/2/3)
+        求解维度。1=仅X方向, 2=XY平面, 3=完整三维。
     nx, ny, nz : int
-        三个方向的网格点数。
+        各方向网格点数（低于 dim 的方向自动设为 1）。
     rho : float [kg/m³]
         电芯平均密度。
     cp : float [J/(kg·K)]
         电芯平均比热容。
     k : float 或 (kx,ky,kz) [W/(m·K)]
-        导热系数。标量=各向同性；三元组=各向异性（叠层电芯常 k_z << k_x,y）。
+        导热系数。标量=各向同性；三元组=各向异性。
+        约定：kx=X(宽度)方向, ky=Y(厚度)方向, kz=Z(高度)方向。
     h : float [W/(m²·K)]
-        六个面对环境的对流换热系数。
+        暴露面对环境的对流换热系数。
     T_amb : float 或 callable(t)->K
         环境温度，可随时间变化。
     T_init : float [K]
         初始温度（均匀）。
+
+    属性
+    ----
+    T : ndarray
+        温度场（展平为一维数组，长度 = 活跃网格点数）。
     """
 
     def __init__(
         self,
         Lx, Ly, Lz,
+        dim=3,
         nx=6, ny=6, nz=10,
-        rho=2500.0, cp=1100.0, k=1.5,
+        rho=2300.0, cp=1000.0, k=1.5,
         h=5.0, T_amb=298.15, T_init=298.15,
     ):
         self.Lx, self.Ly, self.Lz = float(Lx), float(Ly), float(Lz)
-        self.nx, self.ny, self.nz = int(nx), int(ny), int(nz)
+        self.dim = int(dim)
+        if self.dim not in (1, 2, 3):
+            raise ValueError("dim 必须为 1、2 或 3")
         self.rho = float(rho)
         self.cp = float(cp)
         if np.isscalar(k):
@@ -64,111 +75,129 @@ class Cell3DThermal:
         self.T_amb = T_amb
         self.T_init = float(T_init)
 
-        self.nx, self.ny, self.nz = max(self.nx, 2), max(self.ny, 2), max(self.nz, 2)
-        self.N = self.nx * self.ny * self.nz  # 总网格数
-        self.dx = self.Lx / (self.nx - 1)
-        self.dy = self.Ly / (self.ny - 1)
-        self.dz = self.Lz / (self.nz - 1)
+        # 按 dim 截断网格：低于 dim 的方向只取 1 个节点
+        self.nx = max(int(nx), 2) if self.dim >= 1 else 1
+        self.ny = max(int(ny), 2) if self.dim >= 2 else 1
+        self.nz = max(int(nz), 2) if self.dim >= 3 else 1
+
+        self.N = self.nx * self.ny * self.nz
+        self.dx = self.Lx / (self.nx - 1) if self.nx > 1 else self.Lx
+        self.dy = self.Ly / (self.ny - 1) if self.ny > 1 else self.Ly
+        self.dz = self.Lz / (self.nz - 1) if self.nz > 1 else self.Lz
         self.volume = self.Lx * self.Ly * self.Lz
 
-        # 温度场（展平为长度 N 的一维数组，索引 = i*ny*nz + j*nz + k）
         self.T = np.full(self.N, self.T_init)
         self._t = 0.0
-        self._A = None  # 延迟构建矩阵（首次 step 时构建）
+        self._A = None
+        self._A_dt = None
+        self._V_cell = None
+        self._boundary_cache = None  # 缓存边界节点的对流面积
 
     def _idx(self, i, j, k):
         return i * self.ny * self.nz + j * self.nz + k
 
+    def _is_boundary(self, i, j, k):
+        """返回该节点的暴露面总对流面积 [m²]。"""
+        Ax = self.dy * self.dz
+        Ay = self.dx * self.dz
+        Az = self.dx * self.dy
+        area = 0.0
+        if self.nx > 1:
+            if i == 0 or i == self.nx - 1:
+                area += Ax
+        if self.ny > 1:
+            if j == 0 or j == self.ny - 1:
+                area += Ay
+        if self.nz > 1:
+            if k == 0 or k == self.nz - 1:
+                area += Az
+        return area
+
     def _build_matrix(self, dt):
-        """构建隐式欧拉矩阵 A = M - dt·K，其中 M=ρ·cp·V_cell，K=扩散+对流算子。"""
+        """构建隐式欧拉矩阵 A（正定对角占优）与边界面积缓存。"""
         nx, ny, nz = self.nx, self.ny, self.nz
-        N = self.N
         dx, dy, dz = self.dx, self.dy, self.dz
         kx, ky, kz = self.kx, self.ky, self.kz
-        h = self.h
 
-        # 单元体积与面面积
-        V = dx * dy * dz  # 均匀网格
+        V = dx * dy * dz
         Ax = dy * dz
         Ay = dx * dz
         Az = dx * dy
 
         rows, cols, vals = [], [], []
+        boundary_areas = np.zeros(self.N)
 
         for i in range(nx):
             for j in range(ny):
                 for k in range(nz):
                     n = self._idx(i, j, k)
-                    # 扩散：与 6 个邻居的导热
-                    neighbors = []
-                    if i > 0: neighbors.append((self._idx(i-1, j, k), kx * Ax / dx))
-                    if i < nx-1: neighbors.append((self._idx(i+1, j, k), kx * Ax / dx))
-                    if j > 0: neighbors.append((self._idx(i, j-1, k), ky * Ay / dy))
-                    if j < ny-1: neighbors.append((self._idx(i, j+1, k), ky * Ay / dy))
-                    if k > 0: neighbors.append((self._idx(i, j, k-1), kz * Az / dz))
-                    if k < nz-1: neighbors.append((self._idx(i, j, k+1), kz * Az / dz))
-
                     diag_val = 0.0
-                    for nb, g in neighbors:
-                        rows.append(n); cols.append(nb); vals.append(-dt * g)  # 非对角为负
-                        diag_val += dt * g
-                    # 对流边界（暴露的面）
-                    if i == 0: diag_val += dt * h * Ax
-                    if i == nx-1: diag_val += dt * h * Ax
-                    if j == 0: diag_val += dt * h * Ay
-                    if j == ny-1: diag_val += dt * h * Ay
-                    if k == 0: diag_val += dt * h * Az
-                    if k == nz-1: diag_val += dt * h * Az
 
-                    # 对角线 = +(ρ·cp·V + 扩散 + 对流)，正定对角占优
+                    # X 方向邻居
+                    if nx > 1:
+                        if i > 0:
+                            g = kx * Ax / dx
+                            rows.append(n); cols.append(self._idx(i-1, j, k))
+                            vals.append(-dt * g); diag_val += dt * g
+                        if i < nx - 1:
+                            g = kx * Ax / dx
+                            rows.append(n); cols.append(self._idx(i+1, j, k))
+                            vals.append(-dt * g); diag_val += dt * g
+                    # Y 方向邻居
+                    if ny > 1:
+                        if j > 0:
+                            g = ky * Ay / dy
+                            rows.append(n); cols.append(self._idx(i, j-1, k))
+                            vals.append(-dt * g); diag_val += dt * g
+                        if j < ny - 1:
+                            g = ky * Ay / dy
+                            rows.append(n); cols.append(self._idx(i, j+1, k))
+                            vals.append(-dt * g); diag_val += dt * g
+                    # Z 方向邻居
+                    if nz > 1:
+                        if k > 0:
+                            g = kz * Az / dz
+                            rows.append(n); cols.append(self._idx(i, j, k-1))
+                            vals.append(-dt * g); diag_val += dt * g
+                        if k < nz - 1:
+                            g = kz * Az / dz
+                            rows.append(n); cols.append(self._idx(i, j, k+1))
+                            vals.append(-dt * g); diag_val += dt * g
+
+                    # 对流边界
+                    bnd_area = self._is_boundary(i, j, k)
+                    diag_val += dt * self.h * bnd_area
+                    boundary_areas[n] = bnd_area
+
                     rho_cp_V = self.rho * self.cp * V
-                    rows.append(n); cols.append(n); vals.append(rho_cp_V + diag_val)
+                    rows.append(n); cols.append(n)
+                    vals.append(rho_cp_V + diag_val)
 
-        A = csr_matrix((vals, (rows, cols)), shape=(N, N))
-        self._A = A
+        self._A = csr_matrix((vals, (rows, cols)), shape=(self.N, self.N))
         self._A_dt = dt
         self._V_cell = V
-        return A
+        self._boundary_cache = boundary_areas
+        return self._A
 
     def step(self, Q_total, dt, t=None):
         """
         用电芯总产热 Q_total [W] 推进一个时间步 dt [s]。
-
-        把总产热均匀分配到所有网格（体积产热率 q_vol = Q_total / 体积），
-        然后求解三维热传导方程。
-
-        返回更新后的温度场（展平数组，长度 N）。
+        产热均匀分配到所有网格体积。返回更新后的温度场（展平数组）。
         """
         if t is None:
             t = self._t + dt
         Tamb = self.T_amb(t) if callable(self.T_amb) else float(self.T_amb)
 
-        # 体积产热率 [W/m³]
         q_vol = Q_total / self.volume if self.volume > 0 else 0.0
 
-        if self._A is None or abs(self._A_dt - dt) > 1e-12:
+        if self._A is None or self._A_dt is None or abs(self._A_dt - dt) > 1e-12:
             self._build_matrix(dt)
 
         V = self._V_cell
-        rhs = self.rho * self.cp * V * self.T + dt * q_vol * V
-        # 对流边界贡献到右端
-        # (已包含在矩阵 A 的对角线中，这里 rhs 需要加 h·A_face·T_amb)
-        # 由于矩阵中边界对流已加到对角线（减去），rhs 需要补上 h·A·T_amb
-        nx, ny, nz = self.nx, self.ny, self.nz
-        Ax = self.dy * self.dz; Ay = self.dx * self.dz; Az = self.dx * self.dy
-        h = self.h
-        for i in range(nx):
-            for j in range(ny):
-                for k in range(nz):
-                    n = self._idx(i, j, k)
-                    bnd = 0.0
-                    if i == 0: bnd += h * Ax
-                    if i == nx-1: bnd += h * Ax
-                    if j == 0: bnd += h * Ay
-                    if j == ny-1: bnd += h * Ay
-                    if k == 0: bnd += h * Az
-                    if k == nz-1: bnd += h * Az
-                    rhs[n] += dt * bnd * Tamb
+        rho_cp_V = self.rho * self.cp * V
+        rhs = rho_cp_V * self.T + dt * q_vol * V
+        # 对流边界贡献：+ dt·h·A_bnd·T_amb
+        rhs += dt * self.h * self._boundary_cache * Tamb
 
         self.T = spsolve(self._A, rhs)
         self._t = t
@@ -192,5 +221,14 @@ class Cell3DThermal:
         return float(self.T.max())
 
     def reshape(self):
-        """返回三维温度场数组 (nx, ny, nz)。"""
-        return self.T.reshape(self.nx, self.ny, self.nz)
+        """返回温度场数组，形状按 dim 对应 (nx,)/ (nx,ny)/ (nx,ny,nz)。"""
+        if self.dim == 1:
+            return self.T.copy()
+        elif self.dim == 2:
+            return self.T.reshape(self.nx, self.ny)
+        else:
+            return self.T.reshape(self.nx, self.ny, self.nz)
+
+
+# 向后兼容别名
+Cell3DThermal = CellThermalModel
