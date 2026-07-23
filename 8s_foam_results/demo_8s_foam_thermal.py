@@ -1,12 +1,20 @@
-# demo_8s_foam_thermal.py  ——  8S 串联 + 芯间 1mm 泡棉热耦合仿真
+# demo_8s_foam_thermal.py  ——  8S 串联 + 全泡棉热耦合仿真
 #
-# 物理布局: 2 行 × 4 芯, 每行内芯间夹 1mm EVA/PE 泡棉
-#   Row1: [bat1]─泡─[bat2]─泡─[bat3]─泡─[bat4]
-#   Row2: [bat5]─泡─[bat6]─泡─[bat7]─泡─[bat8]
+# 物理布局: 2 行 (X) × 4 列 (Y), 所有相邻芯之间夹 1mm EVA/PE 泡棉
+#   Row1(X0): [bat1]─泡─[bat2]─泡─[bat3]─泡─[bat4]
+#               │泡          │泡       │泡       │泡
+#   Row2(X1): [bat5]─泡─[bat6]─泡─[bat7]─泡─[bat8]
+#
+# 泡棉接触面:
+#   - 行内(Y向, XZ面): A_row = 0.174×0.207 = 0.036 m²
+#   - 列间(X向, YZ面): A_col = 0.0717×0.207 = 0.0148 m²
+#   - R_th = 0.025 K·m²/W (1mm EVA k=0.04)
+#
 # 电气: 8S 串联, 总负载 200A 恒流放电。
-# 热: ThermalNetwork(8 节点) + interface_resistance 建模泡棉层间热阻;
-#     结束后用 CellThermalModel 三维可视化最热电芯的温度场。
-import sys, os, json
+# 冷却: 全自然对流, h_conv=5 W/(m²·K), 所有暴露面。
+# 热模型: ThermalNetwork(8 节点) + 10 条 interface_resistance;
+#         CellThermalModel 可视化最热电芯三维温度场。
+import sys, os
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
@@ -33,46 +41,56 @@ def main():
     n_steps = int(t_total / dt)
 
     # ────── 泡棉参数 ──────
-    k_foam = 0.04                # EVA/PE 泡棉导热系数 [W/(m·K)]
+    k_foam = 0.04                # EVA/PE 泡棉 [W/(m·K)]
     d_foam = 0.001               # 1 mm
-    A_contact = 0.174 * 0.207    # X×Z 面接触面积 [m²]
-    R_th_foam = d_foam / k_foam  # 热接触电阻 [K·m²/W]
-    print(f"泡棉: d={d_foam*1000:.0f}mm, k={k_foam}W/mK → R_th={R_th_foam:.4f} K·m²/W "
-          f"(≈ {R_th_foam*1e4:.1f} K·cm²/W)")
-    print(f"接触面积 A={A_contact*1e4:.0f} cm² → 等效 G={A_contact/R_th_foam:.2f} W/K")
+    R_th_foam = d_foam / k_foam  # 0.025 K·m²/W
+    # 两个接触面
+    A_row = 0.174 * 0.207        # Y方向/XZ面 = 0.03602 m²
+    A_col = 0.0717 * 0.207       # X方向/YZ面 = 0.01484 m²
+    G_row = A_row / R_th_foam    # ≈ 1.44 W/K
+    G_col = A_col / R_th_foam    # ≈ 0.59 W/K
+    print(f"泡棉: 1mm EVA k={k_foam}W/mK → R_th={R_th_foam:.4f} K·m²/W ({R_th_foam*1e4:.0f} K·cm²/W)")
+    print(f"  行内(Y) A={A_row*1e4:.0f}cm² → G={G_row:.3f} W/K")
+    print(f"  列间(X) A={A_col*1e4:.0f}cm² → G={G_col:.3f} W/K")
 
     # ────── 8 颗 314Ah 电芯 ──────
     cells = [ep.ECMCell(ep.cell_314ah_spec(soc_init=1.0, T_init=298.15))
              for _ in range(n_cells)]
 
-    # ────── 电气拓扑: 8S 串联 ──────
-    nl, _, _ = ep.setup_circuit(8, 1)  # 8 串 1 并
+    # ────── 电气: 8S 串联 ──────
+    nl, _, _ = ep.setup_circuit(8, 1)
 
-    # ────── 热网络: interface_resistance 建模泡棉 ──────
-    C_th_cell = 2300.0 * 1000.0 * (0.174 * 0.0717 * 0.207)  # ρ·cp·V ≈ 5941 J/K
-    # 每芯对流: h_conv × 暴露面积
-    # 暴露面 = 总体 - 被泡棉覆盖的面
-    # 末芯(bat1,4,5,8): 仅一面被泡棉覆盖 → 暴露面 = 总体 - A_contact/2
-    # 中芯(bat2,3,6,7): 两面被泡棉覆盖 → 暴露面 = 总体 - A_contact
-    total_surf = 2 * (0.174*0.0717 + 0.174*0.207 + 0.0717*0.207)  # ≈ 0.1267 m²
+    # ────── 热网络 ──────
+    C_th_cell = 2300.0 * 1000.0 * (0.174 * 0.0717 * 0.207)  # 5941 J/K
     h_conv = 5.0  # 自然对流 [W/(m²·K)]
-    h_per_cell = np.zeros(n_cells)
-    # Row1: bat1(idx0), bat2(1), bat3(2), bat4(3)
-    # Row2: bat5(idx4), bat6(5), bat7(6), bat8(7)
-    end_cells = [0, 3, 4, 7]   # bat1, bat4, bat5, bat8
-    mid_cells = [1, 2, 5, 6]   # bat2, bat3, bat6, bat7
-    h_per_cell[end_cells] = h_conv * (total_surf - A_contact)  # ~0.274 W/K
-    h_per_cell[mid_cells] = h_conv * (total_surf - 2*A_contact) # ~0.093 W/K
-    h_per_cell = np.maximum(h_per_cell, 0.05)  # 最低也有少量对流
 
-    # 泡棉层间热阻: (i, j, R_th, A)
+    # 每芯暴露面积（精确计算）
+    # 面面积: A_XZ=Lx·Lz=0.03602, A_YZ=Ly·Lz=0.01484, A_XY=Lx·Ly=0.01248
+    A_xz, A_yz, A_xy = 0.174*0.207, 0.0717*0.207, 0.174*0.0717
+    # 角芯 (bat1,4,5,8): 4 面暴露 (x端+y端+z0+z1) → A_xz+A_yz+2*A_xy = 0.07582
+    A_exp_corner = A_xz + A_yz + 2*A_xy   # 0.07582 m²
+    # 边芯 (bat2,3,6,7): 3 面暴露 (x端+z0+z1) → A_yz+2*A_xy = 0.03980
+    A_exp_edge = A_yz + 2*A_xy             # 0.03980 m²
+
+    h_per_cell = np.zeros(n_cells)
+    h_per_cell[[0, 3, 4, 7]] = h_conv * A_exp_corner   # 角芯 ≈ 0.379 W/K
+    h_per_cell[[1, 2, 5, 6]] = h_conv * A_exp_edge     # 边芯 ≈ 0.199 W/K
+
+    print(f"\n  角芯暴露面={A_exp_corner*1e4:.0f}cm² h·A={h_per_cell[0]:.3f}W/K "
+          f"(bat1,4,5,8)")
+    print(f"  边芯暴露面={A_exp_edge*1e4:.0f}cm² h·A={h_per_cell[1]:.3f}W/K "
+          f"(bat2,3,6,7)")
+
+    # 10 条泡棉层间热阻
+    # 行内(Y方向, XZ面): bat1-bat2, bat2-bat3, bat3-bat4, bat5-bat6, bat6-bat7, bat7-bat8
+    # 列间(X方向, YZ面): bat1-bat5, bat2-bat6, bat3-bat7, bat4-bat8
     iface = [
-        (0, 1, R_th_foam, A_contact),   # bat1-bat2
-        (1, 2, R_th_foam, A_contact),   # bat2-bat3
-        (2, 3, R_th_foam, A_contact),   # bat3-bat4
-        (4, 5, R_th_foam, A_contact),   # bat5-bat6
-        (5, 6, R_th_foam, A_contact),   # bat6-bat7
-        (6, 7, R_th_foam, A_contact),   # bat7-bat8
+        (0, 1, R_th_foam, A_row),  (1, 2, R_th_foam, A_row),
+        (2, 3, R_th_foam, A_row),
+        (4, 5, R_th_foam, A_row),  (5, 6, R_th_foam, A_row),
+        (6, 7, R_th_foam, A_row),
+        (0, 4, R_th_foam, A_col),  (1, 5, R_th_foam, A_col),
+        (2, 6, R_th_foam, A_col),  (3, 7, R_th_foam, A_col),
     ]
 
     thermal = ep.ThermalNetwork(
@@ -86,110 +104,155 @@ def main():
                      n_steps=n_steps, record_every=10)
 
     t = out["Time [s]"]
-    T_cells = out["Cell temperature [K]"]     # (n_rec, 8)
+    T_cells = out["Cell temperature [K]"]
     Vt = out["Pack terminal voltage [V]"]
     I_cell = out["Cell current [A]"]
     soc = out["Cell SoC"]
 
     # ────── 报告 ──────
     print()
-    print("=" * 60)
-    print(f" 8S + 1mm 泡棉  200A / 10min  仿真结果")
-    print("=" * 60)
+    print("=" * 65)
+    print(f" 8S + 全泡棉(10面)  200A / 10min  自然对流冷却")
+    print("=" * 65)
     for idx in range(n_cells):
-        row = "Row1" if idx < 4 else "Row2"
-        pos = idx % 4 + 1
-        print(f"  bat{idx+1} ({row}#{pos})  "
-              f"T_init={T_cells[0,idx]:.2f}K  "
+        pos = "Corner" if idx in [0,3,4,7] else " Edge "
+        bat_num = idx + 1
+        print(f"  bat{bat_num} ({pos})  "
               f"T_final={T_cells[-1,idx]:.2f}K  "
               f"ΔT={T_cells[-1,idx]-T_cells[0,idx]:.3f}K  "
               f"SoC={soc[-1,idx]:.4f}")
     T_all_end = T_cells[-1, :]
-    print(f"  端电压末态: {Vt[-1]:.2f}V")
-    print(f"  整包ΔT_max: {T_all_end.max()-T_all_end.min():.3f}K  "
-          f"(最热: bat{int(np.argmax(T_all_end))+1}@{T_all_end.max():.2f}K, "
-          f"最凉: bat{int(np.argmin(T_all_end))+1}@{T_all_end.min():.2f}K)")
+    dT_pack = T_all_end.max() - T_all_end.min()
+    print(f"  端电压末态: {Vt[-1]:.2f} V")
+    print(f"  整包ΔT_max: {dT_pack:.4f}K  "
+          f"最热(bat{int(np.argmax(T_all_end))+1}@{T_all_end.max():.2f}K)  "
+          f"最凉(bat{int(np.argmin(T_all_end))+1}@{T_all_end.min():.2f}K)")
 
     # ────── 图 1: 整包温度 + 端电压 ──────
-    fig1, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 6))
+    fig1, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, 6))
     colors = plt.cm.tab10(np.linspace(0, 1, n_cells))
     for idx in range(n_cells):
-        lbl = f"bat{idx+1}" + ("(端)" if idx in [0,3,4,7] else "(中)")
+        tpos = "角" if idx in [0,3,4,7] else "边"
+        lbl = f"bat{idx+1}({tpos})"
         ax1.plot(t/60, T_cells[:, idx], color=colors[idx], lw=1.2, label=lbl)
-    ax1.set(ylabel="温度 [K]", title="8S 电芯温度演变（200A 放电 10min）")
-    ax1.legend(ncol=4, fontsize=7, loc="best")
+    ax1.set(ylabel="温度 [K]",
+            title=f"8S 电芯温度演变（200A 10min 自然对流 全泡棉隔离） 整包ΔT={dT_pack:.4f}K")
+    ax1.legend(ncol=4, fontsize=7, loc="upper left")
     ax1.grid(alpha=0.3)
     ax2.plot(t/60, Vt, color="#1f77b4", lw=1.6)
     ax2.set(xlabel="时间 [min]", ylabel="端电压 [V]", title="整包端电压")
     ax2.grid(alpha=0.3)
     fig1.tight_layout()
-    png1 = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..",
-                        "ecm_pack_8s_foam_temp.png")
-    png1 = os.path.abspath(png1)
+    out_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    png1 = os.path.join(out_dir, "ecm_pack_8s_foam_temp.png")
     fig1.savefig(png1, dpi=130)
     plt.close(fig1)
-    print(f"\n  整包温度图: {png1}")
+    print(f"\n  温度曲线: {png1}")
 
-    # ────── 图 2: 末态温度分布 bar chart ──────
-    fig2, ax3 = plt.subplots(figsize=(8, 3))
+    # ────── 图 2: 末态温升 bar + 泡棉热阻示意图 ──────
+    fig2, ax3 = plt.subplots(figsize=(10, 3.5))
     x_pos = np.arange(n_cells)
-    bars = ax3.bar(x_pos, T_all_end - 298.15, color=colors, edgecolor="gray")
-    ax3.set(xticks=x_pos, xticklabels=[f"bat{i+1}" for i in range(n_cells)],
-            ylabel="温升 ΔT [K]", title="末态各电芯温升 (t=10min)")
-    for b, v in zip(bars, T_all_end - 298.15):
-        ax3.text(b.get_x()+b.get_width()/2, b.get_height()+0.005,
-                 f"{v:.2f}", ha="center", fontsize=8)
-    # 标注泡棉位置
+    rise = T_all_end - 298.15
+    bars = ax3.bar(x_pos, rise, color=colors, edgecolor="gray", linewidth=0.8)
+    ax3.set(xticks=x_pos,
+            xticklabels=[f"bat{i+1}" for i in range(n_cells)],
+            ylabel="温升 ΔT [K]",
+            title=f"末态各芯温升 整包ΔT={dT_pack:.4f}K （角芯暴露面大→略凉，芯间温差异常小→泡棉隔离效果好）")
+    for b, v in zip(bars, rise):
+        ax3.text(b.get_x()+b.get_width()/2, b.get_height()+0.002,
+                 f"{v:.3f}", ha="center", fontsize=7.5)
+    # 标记泡棉位置（行内 6 条 + 列间 4 条）
     for gap in [0.5, 1.5, 2.5, 4.5, 5.5, 6.5]:
-        ax3.axvline(gap, color="orange", lw=0.8, ls="--", alpha=0.5)
-    ax3.text(3.5, ax3.get_ylim()[1]*0.9, "泡沫间隙 →", color="orange", fontsize=7, ha="center")
+        ax3.axvline(gap, color="orange", lw=0.8, ls="--", alpha=0.6)
+    for col in range(4):
+        ax3.annotate("", xy=(col+4, rise[col]+0.01), xytext=(col, rise[col]+0.01),
+                     arrowprops=dict(arrowstyle="<->", color="red", lw=1.2))
+    ax3.text(2, rise.mean()+0.03, "行间泡棉 (10面)", color="red", fontsize=9, ha="center")
     fig2.tight_layout()
-    png2 = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..",
-                        "ecm_pack_8s_foam_bar.png")
-    png2 = os.path.abspath(png2)
+    png2 = os.path.join(out_dir, "ecm_pack_8s_foam_bar.png")
     fig2.savefig(png2, dpi=130)
     plt.close(fig2)
-    print(f"  温升柱状图: {png2}")
+    print(f"  温升柱图: {png2}")
 
-    # ────── 图 3: 最热电芯的 3D 温度场 ──────
+    # ────── 图 3: 热网络拓扑示意图 ──────
+    fig3, ax4 = plt.subplots(figsize=(9, 4))
+    pos_2d = {0: (0,3), 1:(1,3), 2:(2,3), 3:(3,3),
+              4: (0,2), 5:(1,2), 6:(2,2), 7:(3,2)}
+    for idx in range(n_cells):
+        x, y = pos_2d[idx]
+        t = "角" if idx in [0,3,4,7] else "边"
+        fc = "lightcoral" if idx in [0,3,4,7] else "lightblue"
+        ax4.add_patch(plt.Rectangle((x-0.35, y-0.35), 0.7, 0.7,
+                                     fc=fc, ec="gray", lw=1.3))
+        ax4.text(x, y, f"bat{idx+1}\n({t})", ha="center", va="center", fontsize=8)
+    # 行内边(Y): 粗线
+    for pair in [(0,1),(1,2),(2,3),(4,5),(5,6),(6,7)]:
+        xm, ym = (pos_2d[pair[0]][0]+pos_2d[pair[1]][0])/2, \
+                 (pos_2d[pair[0]][1]+pos_2d[pair[1]][1])/2
+        ax4.plot([pos_2d[pair[0]][0], pos_2d[pair[1]][0]],
+                 [pos_2d[pair[0]][1], pos_2d[pair[1]][1]],
+                 "orange", lw=2.5, alpha=0.7)
+    # 列间边(X): 虚线
+    for pair in [(0,4),(1,5),(2,6),(3,7)]:
+        ax4.plot([pos_2d[pair[0]][0], pos_2d[pair[1]][0]],
+                 [pos_2d[pair[0]][1], pos_2d[pair[1]][1]],
+                 "red", lw=1.8, ls="--", alpha=0.7)
+    ax4.set(xlim=(-0.7, 3.7), ylim=(1.5, 3.7), xticks=[], yticks=[])
+    ax4.set_title(f"2×4 全泡棉热网络  R_th={R_th_foam*1e4:.0f} K·cm²/W  "
+                  f"G_row={G_row:.1f}W/K  G_col={G_col:.2f}W/K", fontsize=11)
+    ax4.text(1.5, 1.65, "─ 行内Y向 (XZ面 A=360cm²)  ── 列间X向 (YZ面 A=148cm²)",
+             ha="center", fontsize=8, color="gray")
+    ax4.set_aspect("equal")
+    fig3.tight_layout()
+    png3 = os.path.join(out_dir, "ecm_pack_8s_foam_network.png")
+    fig3.savefig(png3, dpi=130)
+    plt.close(fig3)
+    print(f"  热网络图: {png3}")
+
+    # ────── 最热电芯 3D 温度场 ──────
     hottest_idx = int(np.argmax(T_all_end))
     T_hot = T_all_end[hottest_idx]
-    # 估算最热芯的产热: 同串各芯 I 相同, 取它自己的电流
-    Q_avg = float(np.mean(np.abs(I_cell[-30:, hottest_idx])**2 * 0.4e-3))
-    print(f"\n  最热电芯: bat{hottest_idx+1} (T={T_hot:.2f}K), 估算产热≈{Q_avg:.1f}W")
+    Q_avg = float(np.mean(np.abs(I_cell[-30:, hottest_idx])**2 * 0.4e-3))  # I²R0
+    print(f"\n  最热电芯 bat{hottest_idx+1} T={T_hot:.2f}K  Q≈{Q_avg:.1f}W")
 
-    # 创建单芯 3D 热模型，用 pack 结果约束边界条件
     tm = CellThermalModel(
         Lx=0.174, Ly=0.0717, Lz=0.207, dim=3,
         nx=6, ny=5, nz=8,
         rho=2300.0, cp=1000.0, k=(12.0, 0.7, 11.6),
-        h={"default": 5.0},        # 假设暴露面自然对流
-        T_amb=298.15, T_init=298.15,
-        R_shell=0.3,
+        h=5.0, T_amb=298.15, T_init=298.15, R_shell=0.3,
     )
-    # 用 pack 平均产热驱动 3D 回放
     for _ in range(int(t_total / dt)):
         tm.step(Q_avg, dt)
     stats = tm.temperature_stats()
-    print(f"  3D热场: T_avg={stats['T_avg [K]']:.2f}K  "
-          f"T_max={stats['T_max [K]']:.2f}K  "
+    print(f"  3D: T_avg={stats['T_avg [K]']:.2f}K  T_max={stats['T_max [K]']:.2f}K  "
           f"ΔT={stats['dT_max [K]']:.4f}K  "
-          f"T_surface={stats.get('T_surface [K]', 'N/A')}")
+          f"T_surface={stats.get('T_surface [K]','N/A'):.2f}K")
 
-    fig3 = tm.plot_summary(
-        save_path="/workspace/ecm_pack_8s_foam_3dcell.png", dpi=130)
-    print(f"  3D电芯温度场: /workspace/ecm_pack_8s_foam_3dcell.png")
+    png4 = os.path.join(out_dir, "ecm_pack_8s_foam_3dcell.png")
+    tm.plot_summary(save_path=png4, dpi=130)
+    print(f"  3D温度场: {png4}")
 
-    # ────── CSV 输出 ──────
-    csv_path = "/workspace/ecm_pack_8s_foam_data.csv"
+    # ────── CSV ──────
+    csv_path = os.path.join(out_dir, "ecm_pack_8s_foam_data.csv")
     header = "Time_s,Vt_V," + ",".join([f"T_bat{i+1}_K" for i in range(n_cells)]) \
              + "," + ",".join([f"SOC_bat{i+1}" for i in range(n_cells)])
-    np.savetxt(csv_path,
-               np.column_stack([t, Vt] + [T_cells[:, i] for i in range(n_cells)]
-                               + [soc[:, i] for i in range(n_cells)]),
-               delimiter=",", header=header, fmt="%.6f")
+    # Pack 输出可能返回 (n,) 或 (n,1) 的 ndarray，统一 flatten
+    data_cols = [np.asarray(t, float).flatten(), np.asarray(Vt, float).flatten()]
+    for i in range(n_cells):
+        data_cols.append(np.asarray(T_cells[:, i], float).flatten())
+    for i in range(n_cells):
+        data_cols.append(np.asarray(soc[:, i], float).flatten())
+    np.savetxt(csv_path, np.column_stack(data_cols), delimiter=",",
+               header=header, fmt="%.6f")
     print(f"  数据: {csv_path}")
-    print("=" * 60)
+    print("=" * 65)
+
+    # 额外分析：平均化时间序列，看角芯 vs 边芯的温差趋势
+    rise_corner = np.mean(T_cells[:, [0,3,4,7]], axis=1) - 298.15
+    rise_edge = np.mean(T_cells[:, [1,2,5,6]], axis=1) - 298.15
+    print(f"\n  角芯平均温升: {rise_corner[-1]:.3f}K  边芯平均温升: {rise_edge[-1]:.3f}K")
+    print(f"  角-边温差: {rise_edge[-1]-rise_corner[-1]:.4f}K "
+          f"(边芯热堆积，泡棉隔离→温差极小)")
 
 
 if __name__ == "__main__":
