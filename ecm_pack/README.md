@@ -44,10 +44,10 @@ python3.11 ecm_pack/examples/demo_8s2p_200a.py        # 8S2P / 总负载 200A �
 | 文件 | 职责 |
 |---|---|
 | `data.py` | 参数归一化：常量 / 可调用 / 1D·2D·3D 查表统一成可调用函数 |
-| `ecm.py` | `ECMCellSpec`（规格）+ `ECMCell`（状态）。RC 支路用**解析指数积分**推进，无条件稳定 |
+| `ecm.py` | `ECMCellSpec`（规格）+ `ECMCell`（状态）。RC 支路用**解析指数积分**推进，无条件稳定；支持 `R_contact` 连接电阻发热 |
 | `circuit.py` | `Netlist` + `solve_circuit`（MNA 求解，支持电流/功率控制）+ `setup_circuit(nS,nP)` + `setup_two_group` + `setup_series_bypass` |
-| `thermal.py` | `ThermalNetwork`：集总热容 + 对流 + **自定义电芯间导热**（隐式欧拉，无条件稳定） |
-| `thermal3d.py` | `CellThermalModel`：**三维有限体积热模型**，支持 `dim=1,2,3` 自由切换；各向异性导热 k=(kx,ky,kz)；隐式欧拉 + scipy.sparse 稀疏求解 |
+| `thermal.py` | `ThermalNetwork`：集总热容 + 对流 + 自定义电芯间导热 + **层间热接触电阻 R_th**（硅胶垫/气隙界面效应）；隐式欧拉，无条件稳定 |
+| `thermal3d.py` | `CellThermalModel`：**三维有限体积热模型**，支持 `dim=1,2,3` 切换；各向异性 k=(kx,ky,kz)；**非对称冷却**（每面独立 h）；**壳层热阻 R_shell**（T_surface/T_core_max）；内置 `plot_slice()`/`plot_summary()` 可视化 |
 | `defaults.py` | **314Ah 大电芯默认参数**：`cell_314ah_spec()` —— 精确几何 174×71.7×207mm，热物性 ρ=2300, cp=1000, k=(12,0.7,11.6)，电气 R0=R1=0.4mΩ, τ=100s |
 | `pack.py` | `Pack`：双步循环耦合 ECM+电路+热；`set_topology()` 与 `solve(topology_events=, switch_callback=)` 支持拓扑热切换 |
 
@@ -152,7 +152,63 @@ T_field = tm3.reshape()   # dim=1→(nx,)  dim=2→(nx,ny)  dim=3→(nx,ny,nz)
 T_mean, T_max, T_min = tm3.stats()
 ```
 
-**数值方法**：隐式欧拉（后向欧拉），scipy.sparse 稀疏矩阵求解，任意步长 dt 和导热系数均无条件稳定。
+**数值方��**：隐式欧拉（后向欧拉），scipy.sparse 稀疏矩阵求解，任意步长 dt 和导热系数均无条件稳定。
+
+---
+
+## 热模型五大新增功能
+
+### ① 非对称冷却（面差异化 h）
+
+```python
+# 水冷板在 x0 面 200 W/m²K，其余自然对流 5
+tm = CellThermalModel(0.174, 0.0717, 0.207, dim=3,
+                      h={"x0": 200, "default": 5})
+# 或 6-元组: h=(hx0,hx1,hy0,hy1,hz0,hz1)
+```
+
+每面独立的对流系数，真实模拟单面水冷 / 非对称散热场景。
+
+### ② 接触/连接电阻发热
+
+```python
+spec = ECMCellSpec(capacity=314, ..., R_contact=0.0005)  # 0.5 mΩ
+# Pack 自动叠加: R0_eff = R0 + R_contact
+# 产热自动包含: Q = Q_internal + I²·R_contact
+```
+
+模拟 tab/焊接/busbar 等效串联电阻的附加压降与发热，高倍率（≥2C）场景不可忽略。
+
+### ③ 层间热接触电阻
+
+```python
+thermal = ThermalNetwork(4, C_th=500,
+    interface_resistance=[(0, 1, 2e-4, 0.036),   # R_th=2 K·cm²/W, A=0.036 m²
+                          (1, 2, 2e-4, 0.036)])
+# 自动换算 G = A / R_th，无缝叠加到传导矩阵
+```
+
+将硅胶垫/气隙/蓝膜的界面热阻直接作为物理参数输入，G=A/R_th 自动换算。
+
+### ④ 壳层表面温度（BMS 传感器对标）
+
+```python
+tm = CellThermalModel(0.174, 0.0717, 0.207, R_shell=0.3)  # 0.3 K/W
+tm.step(Q=50, dt=10)
+print(tm.T_surface)   # 壳温（对 BMS 传感器读数）
+print(tm.T_core_max)  # 体心最高温（内部真实热点）
+```
+
+R_shell 在 FVM 体温度与环境之间插入一层热阻，分离电芯内部温度与表面可测温度。
+
+### ⑤ 热场一键可视化
+
+```python
+tm.plot_slice("xy")                    # XY 中截面 heatmap
+tm.plot_summary(save_path="out.png")   # 三截面 + 统计摘要
+```
+
+无需手写 matplotlib 代码，直接出图查看温度分布。
 
 ---
 
@@ -206,7 +262,7 @@ pack.set_topology(nl_par, act_par)   # 立即生效，电芯状态零丢失
 
 ## 验证结果
 
-**测试覆盖**：31 项 pytest 全部通过（`ecm` / `circuit` / `thermal` / `pack` / `thermal3d`）。
+**测试覆盖**：**51 项 pytest** 全部通过（`ecm` / `circuit` / `thermal` / `pack` / `thermal3d`），含 20 项新增热模型测试。
 
 **演示图**（`/workspace/*.png`）：
 
@@ -219,4 +275,7 @@ pack.set_topology(nl_par, act_par)   # 立即生效，电芯状态零丢失
 | 拓扑热切换 8S → 8S2P | 并入瞬间自动产生 ~21.8A 组间环流，10min 内 SoC Δ 0.463→0.078 ✓ |
 | 故障容错旁路 | 缺陷芯到 3.4V 自动旁路，整包不宕机（8S→7S，V 28.9→25.5V）✓ |
 | 314Ah 1D/2D/3D 热对比 | 1D ΔT=0.19K，2D/3D ΔT~0.74K（厚度方向 k=0.7 W/mK 为瓶颈）✓ |
-| **8S2P 200A 环流工况** | **并入瞬间环流峰值 139.7A（I_A=−39.7A 被充电，I_B=239.7A），稳态 10.4A；RC 极化失配主导合闸涌流，后段 SoC 差驱动慢速均衡** ✓ |
+| **8S2P 200A 环流工况** | **并入瞬间环流峰值 139.7A，稳态 10.4A；RC 极化失配主导合闸涌流** ✓ |
+| **非对称冷却** | **强冷面侧温度显著低于对面（1D 验证 ΔT>0）** ✓ |
+| **壳层热阻** | **R_shell=0.5 K/W 时 T_surface 介于 T_avg 和 T_amb 之间** ✓ |
+| **层间热接触电阻** | **R_th×100 使层间温差增大** ✓ |
