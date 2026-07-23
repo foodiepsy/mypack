@@ -80,6 +80,9 @@ class ECMCellSpec:
         diffusion=False,
         tau_D=100.0,
         nx=12,
+        # 三维热模型几何参数（用于 Cell3DThermal）
+        Lx=None, Ly=None, Lz=None,
+        rho=None, cp=None, k=None,
     ):
         self.capacity = float(capacity)
         self.ocv = as_callable(ocv)
@@ -97,6 +100,13 @@ class ECMCellSpec:
         self.diffusion = bool(diffusion)
         self.tau_D = float(tau_D)
         self.nx = int(nx)
+        # 三维热模型几何参数（可选；填入后可驱动 Cell3DThermal）
+        self.Lx = float(Lx) if Lx is not None else None
+        self.Ly = float(Ly) if Ly is not None else None
+        self.Lz = float(Lz) if Lz is not None else None
+        self.rho = float(rho) if rho is not None else None
+        self.cp = float(cp) if cp is not None else None
+        self.k = k  # 标量或三元组，原样保存
 
     def clone(self, **overrides):
         """复制规格并覆盖部分字段（用于构造参数略有差异的整包电芯）。"""
@@ -112,6 +122,8 @@ class ECMCellSpec:
             diffusion=self.diffusion,
             tau_D=self.tau_D,
             nx=self.nx,
+            Lx=self.Lx, Ly=self.Ly, Lz=self.Lz,
+            rho=self.rho, cp=self.cp, k=self.k,
         )
         kwargs.update(overrides)
         return ECMCellSpec(**kwargs)
