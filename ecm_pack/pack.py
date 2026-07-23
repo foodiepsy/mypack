@@ -10,6 +10,8 @@
 #
 # 这正是 liionpack「更新网表 → 解电路 → 步进电化学模型 → 更新热」的范式，
 # 只不过把黑盒 PyBaMM 模型替换成了我们可定制的 ECM 电芯。
+import warnings
+
 import numpy as np
 
 from .circuit import solve_circuit
@@ -155,7 +157,11 @@ class Pack:
             else:
                 Vn0, Ib0, It0, Vt0, Pt0 = solve_circuit(self.netlist, power=control[0])
             Ic0 = self.cell_current_sign * Ib0
-        except Exception:
+        except Exception as _e:
+            warnings.warn(
+                f"Pack.solve 初始电路求解失败，将以零值初始化 t=0 快照 "
+                f"(请检查网表/控制量是否合法): {type(_e).__name__}: {_e}"
+            )
             Vn0, It0, Vt0, Pt0, Ic0 = (np.zeros(N + 1), 0.0, 0.0, 0.0, np.zeros(N))
         Ic0_full = np.zeros(N)
         for k, idx in enumerate(self.active):
@@ -180,10 +186,14 @@ class Pack:
 
         def record(t, V_node, I_term, V_term, P_term, I_cell, V_cell, soc, T, Rint, topo=False):
             nonlocal rec_i
+            # 统一标量化（solve_circuit 对单负载返回 shape (1,) 的 ndarray）
+            _I_term = float(np.asarray(I_term).reshape(-1)[0])
+            _V_term = float(np.asarray(V_term).reshape(-1)[0])
+            _P_term = float(np.asarray(P_term).reshape(-1)[0])
             out["Time [s]"][rec_i] = t
-            out["Pack current [A]"][rec_i] = I_term
-            out["Pack terminal voltage [V]"][rec_i] = V_term
-            out["Pack power [W]"][rec_i] = P_term
+            out["Pack current [A]"][rec_i] = _I_term
+            out["Pack terminal voltage [V]"][rec_i] = _V_term
+            out["Pack power [W]"][rec_i] = _P_term
             out["Cell current [A]"][rec_i] = I_cell
             out["Cell terminal voltage [V]"][rec_i] = V_cell
             out["Cell SoC"][rec_i] = soc

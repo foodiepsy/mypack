@@ -54,6 +54,11 @@ def solve_circuit(netlist, current=None, power=None):
     node2 = df["node2"].values.astype(int)
     value = df["value"].values.astype(float)
 
+    # 输入校验：所有电阻必须为正，避免 1/value 除零把 inf/nan 注入 G 矩阵
+    if np.any(value[R_map] <= 0):
+        bad_rows = np.where(R_map)[0][value[R_map] <= 0]
+        raise ValueError(f"电阻必须为正(R>0)，以下网表行非法: {bad_rows.tolist()}")
+
     # 节点编号：0 为地；内部矩阵索引 0..n-1（地 = -1）
     # 注意：节点号不连续（含电芯私有节点），n 必须取最大节点号
     n = int(max(node1.max(), node2.max()))  # 最大节点号
@@ -117,29 +122,58 @@ def solve_circuit(netlist, current=None, power=None):
         V_node = np.zeros(n + 1)
         V_node[1:] = X[:n]
         terminal_current = cur
-    else:  # power 控制：迭代电流直到 V_terminal * I ≈ power
-        current_guess = np.atleast_1d(value[I_map]).astype(float)
-        tol = 1e-3
-        for _ in range(200):
+    else:  # power 控制：线性电路端口为 Thevenin 仿射关系 V(I)=V_oc-R_eq·I，
+        # 故 P=V·I=V_oc·I-R_eq·I² 有**闭式精确解**（无需脆弱迭代）。
+        m_src = int(I_map.sum())
+        ni = n1[I_map]
+        nj = n2[I_map]
+
+        def _solve_with_current(cur):
             i = np.zeros((n, 1))
-            ni = n1[I_map]
-            nj = n2[I_map]
-            for k in range(len(current_guess)):
+            for k in range(len(cur)):
                 if ni[k] >= 0:
-                    i[ni[k], 0] -= current_guess[k]
+                    i[ni[k], 0] -= cur[k]
                 if nj[k] >= 0:
-                    i[nj[k], 0] += current_guess[k]
+                    i[nj[k], 0] += cur[k]
             z = np.vstack([i, e])
             X = np.linalg.solve(A, z).flatten()
-            I_batt = X[n:]
-            V_node = np.zeros(n + 1)
-            V_node[1:] = X[:n]
-            V_term = V_node[Terminal_Node]
-            P_guess = V_term * current_guess
-            if np.all(np.abs(P_guess - power) < tol):
-                break
-            current_guess = current_guess + (power - P_guess) / V_term
-        terminal_current = current_guess
+            Vn = np.zeros(n + 1)
+            Vn[1:] = X[:n]
+            return X, Vn
+
+        # V_oc：全部负载电流=0；R_eq：逐源单位电流探针（对角 Thevenin 等效）
+        _, Vn_oc = _solve_with_current(np.zeros(m_src))
+        V_oc = Vn_oc[Terminal_Node]
+        R_eq = np.zeros(m_src)
+        for k in range(m_src):
+            probe = np.zeros(m_src)
+            probe[k] = 1.0
+            _, Vn_p = _solve_with_current(probe)
+            R_eq[k] = V_oc[k] - Vn_p[Terminal_Node[k]]
+
+        power_arr = np.atleast_1d(np.asarray(power, dtype=float))
+        if power_arr.size == 1 and m_src > 1:
+            power_arr = np.full(m_src, power_arr[0])
+        cur = np.zeros(m_src)
+        for k in range(m_src):
+            P = power_arr[k] if k < power_arr.size else power_arr[-1]
+            if R_eq[k] <= 0:
+                raise ValueError(
+                    f"功率控制：第{k}个负载支路等效内阻非正 (R_eq={R_eq[k]:.4g})，无法求解"
+                )
+            Pmax = V_oc[k] ** 2 / (4.0 * R_eq[k])
+            if P > Pmax + 1e-6:
+                raise ValueError(
+                    f"功率控制：需求 {P:.4g}W 超出第{k}个负载最大可输出功率 "
+                    f"Pmax={Pmax:.4g}W（不可行）"
+                )
+            disc = max(V_oc[k] ** 2 - 4.0 * R_eq[k] * P, 0.0)
+            # 取低电流(高电压)的物理根；另一根是高电流低电压的病态分支
+            cur[k] = (V_oc[k] - np.sqrt(disc)) / (2.0 * R_eq[k])
+        # 用精确线性解得到自洽的 V_node / I_batt
+        X, V_node = _solve_with_current(cur)
+        I_batt = X[n:]
+        terminal_current = cur
 
     terminal_voltage = V_node[Terminal_Node]
     terminal_power = terminal_voltage * terminal_current

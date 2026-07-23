@@ -181,7 +181,12 @@ class ECMCell:
         main = np.ones(n) * (1.0 + 2.0 * r)
         lower = np.ones(n - 1) * (-r)
         upper = np.ones(n - 1) * (-r)
-        # 右边界通量：用虚节点 z_{n} = z_{n-2} - 2·dx·J，J = -tau_D·I/(Q·3600)
+        # Neumann 边界（两端）：虚节点法使 Laplacian 在边界退化为 2(邻居-自身)，
+        # 因此边界行的次对角系数必须为 **-2r**（非 -r），否则分布 SoC 质量不守恒。
+        if n > 1:
+            lower[-1] = -2.0 * r   # 右边界行：系数作用在 z_{n-2}
+            upper[0] = -2.0 * r    # 左边界行：系数作用在 z_1
+        # 右边界通量：用虚节点 z_{n} = z_{n-2} + 2·dx·J，J = -tau_D·I/(Q·3600)
         J = -tau_D * I / (self.spec.capacity * 3600.0)
         # 右端项修正：把通量并入最后一个方程
         rhs = z.copy()

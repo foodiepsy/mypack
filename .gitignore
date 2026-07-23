@@ -7,6 +7,8 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
+.coverage
+htmlcov/
 
 # 代理/工具内部目录
 .codebuddy/
