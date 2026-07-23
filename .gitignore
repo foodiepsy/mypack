@@ -1,0 +1,12 @@
+# 外部仓库克隆（他人的源码，不纳入本库）
+liionpack/
+PyBaMM/
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# 代理/工具内部目录
+.codebuddy/
