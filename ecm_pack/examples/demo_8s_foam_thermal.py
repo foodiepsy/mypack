@@ -269,38 +269,36 @@ def main():
 
 def _draw_pack_3d(T_vals, save_path, cell_L=0.174, cell_W=0.0717, cell_H=0.207,
                   gap_X=0.001, gap_Y=0.001, T_amb=298.15):
-    """绘制 2×4 电池包三维图 —— bat1↔bat5 大面背靠背, bat1↔bat2 厚度面项链, 防爆阀朝上。
+    """8S电池包: 底面(71.7×174)坐XY, Z=207高, 防爆阀朝上。
 
-    X: 4 芯 × 174mm (同行厚度面相贴)
-    Y: 2 芯 × 71.7mm (跨行大面背靠背)
-    Z: 207mm 高 → 防爆阀在顶面(174×71.7)
+    X: 2对(bat1↔bat5大面174×207背靠背, 间距71.7+泡棉)
+    Y: 4列(bat1↔bat2厚度面71.7×207项链, 间距174+泡棉)
+    Z: 207mm ↑ 防爆阀在顶面(71.7×174)正中央
     """
     from mpl_toolkits.mplot3d.art3d import Poly3DCollection
     import matplotlib.patches as mpatches
 
     T = np.asarray(T_vals, float).ravel()
-    nX, nY = 4, 2   # 4 列宽, 2 行深
+    nX, nY = 2, 4   # 2对背靠背, 4列项链
     T_rise = T - T_amb
 
-    cX, cY, cZ = cell_L, cell_W, cell_H  # 174, 71.7, 207
+    cX, cY, cZ = cell_W, cell_L, cell_H  # 71.7, 174, 207
     pitch_X = cX + gap_X
     pitch_Y = cY + gap_Y
 
-    fig = plt.figure(figsize=(15, 9))
+    fig = plt.figure(figsize=(14, 9))
     ax = fig.add_subplot(111, projection='3d')
     ax.set_proj_type('ortho')
     cmap = plt.cm.coolwarm
     norm = plt.Normalize(vmin=max(T_rise.min(), 0), vmax=T_rise.max() + 0.1)
-    ax.view_init(elev=25, azim=-55)
+    ax.view_init(elev=24, azim=-50)
 
     offset_X = -((nX-1) * pitch_X + cX) / 2
     offset_Y = -((nY-1) * pitch_Y + cY) / 2
 
     for ix in range(nX):
         for iy in range(nY):
-            # bat numbering: ix=0 (bat1, bat5), ix=1 (bat2, bat6), etc.
-            #               iy=0 → row0(bat1-4), iy=1 → row1(bat5-8)
-            idx = iy * nX + ix   # bat1(ix=0,iy=0), bat5(ix=0,iy=1)
+            idx = ix * nY + iy  # bat1(0,0)=0, bat5(1,0)=4, bat2(0,1)=1...
 
             x0 = offset_X + ix * pitch_X
             y0 = offset_Y + iy * pitch_Y
@@ -320,89 +318,72 @@ def _draw_pack_3d(T_vals, save_path, cell_L=0.174, cell_W=0.0717, cell_H=0.207,
                 [x0,       y0 + cY,  z0 + cZ],
             ])
 
-            # 所有 6 个面
             faces = [
-                [p[0], p[1], p[2], p[3]],  # 底面
-                [p[4], p[5], p[6], p[7]],  # 顶面 (防爆阀在此)
-                [p[0], p[1], p[5], p[4]],  # 前(Y0) — 厚度面 174×207 if cy=71.7, cz=207...
-                [p[2], p[3], p[7], p[6]],  # 后(Y1)
-                [p[0], p[3], p[7], p[4]],  # 左(X0)
-                [p[1], p[2], p[6], p[5]],  # 右(X1)
+                [p[0], p[1], p[2], p[3]],  # 底面 XY(71.7×174)
+                [p[4], p[5], p[6], p[7]],  # 顶面(防爆阀)
+                [p[0], p[1], p[5], p[4]],  # 前 XZ(71.7×207) 厚度面
+                [p[2], p[3], p[7], p[6]],  # 后 XZ(71.7×207) 厚度面
+                [p[0], p[3], p[7], p[4]],  # 左 YZ(174×207) 大面
+                [p[1], p[2], p[6], p[5]],  # 右 YZ(174×207) 大面
             ]
             poly = Poly3DCollection(faces, alpha=0.80, linewidth=0.5,
                                     edgecolor='#333', facecolor=face_color)
             ax.add_collection3d(poly)
 
-            # ── 防爆阀: 顶面(Z=cZ)正中央 ──
-            vx_center = x0 + cX / 2
-            vy_center = y0 + cY / 2
-            vz_top = z0 + cZ
-
-            valve_r = 0.014  # 14mm 半径
-            valve_h = 0.008  # 突起 8mm
-            segs = 20
+            # 防爆阀: 顶面(Z=cZ)正中央
+            vx, vy, vz = x0 + cX/2, y0 + cY/2, z0 + cZ
+            valve_r, valve_h, segs = 0.010, 0.006, 18
             theta = np.linspace(0, 2*np.pi, segs+1)
-            th_x = vx_center + valve_r * np.cos(theta)
-            th_y = vy_center + valve_r * np.sin(theta)
-            z_base = np.full_like(th_x, vz_top)
-            z_peak = np.full_like(th_x, vz_top + valve_h)
-
+            th_x = vx + valve_r * np.cos(theta)
+            th_y = vy + valve_r * np.sin(theta)
+            zb, zt = np.full_like(th_x, vz), np.full_like(th_x, vz + valve_h)
             for i in range(segs):
                 ax.add_collection3d(Poly3DCollection(
-                    [[(th_x[i],   th_y[i],   z_base[i]),
-                      (th_x[i+1], th_y[i+1], z_base[i+1]),
-                      (th_x[i+1], th_y[i+1], z_peak[i+1]),
-                      (th_x[i],   th_y[i],   z_peak[i])]],
-                    alpha=0.95, facecolor='#cc2222', edgecolor='#770000',
-                    linewidth=0.4))
+                    [[(th_x[i],th_y[i],zb[i]),(th_x[i+1],th_y[i+1],zb[i+1]),
+                      (th_x[i+1],th_y[i+1],zt[i+1]),(th_x[i],th_y[i],zt[i])]],
+                    alpha=0.95, facecolor='#cc2222', edgecolor='#770000', linewidth=0.4))
             for i in range(1, segs):
                 ax.add_collection3d(Poly3DCollection(
-                    [[(th_x[0], th_y[0], z_peak[0]),
-                      (th_x[i], th_y[i], z_peak[i]),
-                      (th_x[i+1], th_y[i+1], z_peak[i+1])]],
-                    alpha=1.0, facecolor='#dd3333', edgecolor='#770000',
-                    linewidth=0.3))
+                    [[(th_x[0],th_y[0],zt[0]),(th_x[i],th_y[i],zt[i]),
+                      (th_x[i+1],th_y[i+1],zt[i+1])]],
+                    alpha=1.0, facecolor='#dd3333', edgecolor='#770000', linewidth=0.3))
 
-            # 编号
-            ax.text(x0 + cX/2, y0 + cY/2, vz_top + valve_h + 0.004,
-                    f'bat{idx+1}', ha='center', va='bottom',
-                    fontsize=8, fontweight='bold')
+            ax.text(x0+cX/2, y0+cY/2, vz+valve_h+0.004,
+                    f'bat{idx+1}', ha='center', va='bottom', fontsize=8, fontweight='bold')
 
     sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
     sm.set_array([])
     cbar = fig.colorbar(sm, ax=ax, shrink=0.55, pad=0.07)
     cbar.set_label('温升 ΔT [K]', fontsize=10)
 
-    ax.set_xlabel('X (4芯宽=174mm×4+泡棉) [m]', fontsize=9)
-    ax.set_ylabel('Y (2芯深=71.7mm×2+泡棉) [m]', fontsize=9)
-    ax.set_zlabel('Z (高=207mm) [m]', fontsize=9)
+    ax.set_xlabel('X (2对大面背靠背 71.7+泡棉) [m]', fontsize=9)
+    ax.set_ylabel('Y (4列厚度项链 174+泡棉) [m]', fontsize=9)
+    ax.set_zlabel('Z (高207mm 防爆阀↑) [m]', fontsize=9)
 
-    x_span = nX * cX + (nX-1) * gap_X
-    y_span = nY * cY + (nY-1) * gap_Y
+    x_span = nX*cX + (nX-1)*gap_X
+    y_span = nY*cY + (nY-1)*gap_Y
     pad = 0.03
     ax.set_xlim(offset_X - pad, offset_X + x_span + pad)
     ax.set_ylim(offset_Y - pad, offset_Y + y_span + pad)
-    ax.set_zlim(-pad, cZ + 0.06)
+    ax.set_zlim(-pad, cZ + 0.05)
 
     ax.grid(True, alpha=0.3)
     for pn in ('xaxis', 'yaxis', 'zaxis'):
         getattr(ax, pn).pane.fill = False
 
     ax.legend(handles=[
-        mpatches.Patch(color='#cc2222', label='防爆阀 (顶面)'),
-        mpatches.Patch(color='#5a8ac9', alpha=0.8, label='电芯壳 (按ΔT着色)'),
+        mpatches.Patch(color='#cc2222', label='防爆阀(顶面)'),
+        mpatches.Patch(color='#5a8ac9', alpha=0.8, label='电芯壳(按ΔT着色)'),
     ], loc='upper left', fontsize=9, framealpha=0.95)
 
     Tmn, Tmx = T_rise.min(), T_rise.max()
-    ax.set_title(f'8S 电池包 · 大面背靠背 + 厚度面项链 · 末态温度场\n'
-                 f'T_amb={T_amb:.0f}K  ΔT {Tmn:.1f}~{Tmx:.1f}K  '
-                 f'防爆阀朝上(Z+)',
-                 fontsize=12, fontweight='bold')
+    ax.set_title(
+        f'8S电池包 · 2列大面背靠背 × 4列厚度项链 · 防爆阀↑\n'
+        f'T_amb={T_amb:.0f}K  ΔT {Tmn:.1f}~{Tmx:.1f}K',
+        fontsize=12, fontweight='bold')
 
-    fig.tight_layout(rect=[0, 0, 0.95, 1])
+    fig.tight_layout(rect=[0,0,0.95,1])
     fig.savefig(save_path, dpi=140, bbox_inches='tight')
     plt.close(fig)
-
-
 if __name__ == "__main__":
     main()
