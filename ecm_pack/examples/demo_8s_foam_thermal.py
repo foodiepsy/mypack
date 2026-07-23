@@ -259,6 +259,176 @@ def main():
     print(f"  角-边温差: {rise_edge[-1]-rise_corner[-1]:.4f}K "
           f"(边芯热堆积，泡棉隔离→温差极小)")
 
+    # ────── 3D 电池包可视化（2×4 排布 + 防爆阀）──────
+    png5 = os.path.join(out_dir, "ecm_pack_8s_3dpack.png")
+    _draw_pack_3d(T_cells[-1, :], png5,
+                  cell_L=0.174, cell_W=0.0717, cell_H=0.207,
+                  gap_X=0.001, gap_Y=0.001, T_amb=298.15)
+    print(f"  3D电池包: {png5}")
+
+
+def _draw_pack_3d(T_vals, save_path, cell_L=0.174, cell_W=0.0717, cell_H=0.207,
+                  gap_X=0.001, gap_Y=0.001, T_amb=298.15):
+    """绘制 2×4 电池包三维图：各芯着色温度，顶面标注防爆阀(红色圆柱)。"""
+    from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+    import matplotlib.patches as mpatches
+    from itertools import product
+
+    T = np.asarray(T_vals, float).ravel()
+    n_rows, n_cols = 2, 4
+    T_rise = T - T_amb
+
+    fig = plt.figure(figsize=(15, 9))
+    ax = fig.add_subplot(111, projection='3d')
+    ax.set_proj_type('ortho')
+
+    cmap = plt.cm.coolwarm
+    norm = plt.Normalize(vmin=max(T_rise.min(), 0), vmax=T_rise.max() + 0.1)
+
+    # Camera: 抬高看顶面
+    ax.view_init(elev=35, azim=-50)
+
+    # 中心绘制 (推荐视角：cells 在 X-Y 平面，Z 朝上)
+    for row in range(n_rows):
+        for col in range(n_cols):
+            idx = row * n_cols + col
+            x0 = row * (cell_L + gap_X) - 0.5 * (cell_L * n_rows + gap_X * (n_rows-1))
+            y0 = col * (cell_W + gap_Y) - 0.5 * (cell_W * n_cols + gap_Y * (n_cols-1))
+            z0 = 0.0
+            Lx, Ly, Lz = cell_L, cell_W, cell_H
+
+            tr = T_rise[idx]
+            face_color = cmap(norm(tr))
+
+            p = np.array([
+                [x0,      y0,      z0],
+                [x0 + Lx, y0,      z0],
+                [x0 + Lx, y0 + Ly, z0],
+                [x0,      y0 + Ly, z0],
+                [x0,      y0,      z0 + Lz],
+                [x0 + Lx, y0,      z0 + Lz],
+                [x0 + Lx, y0 + Ly, z0 + Lz],
+                [x0,      y0 + Ly, z0 + Lz],
+            ])
+
+            # 只画 4 个侧面 (顶面留给防爆阀更突出)
+            side_faces = [
+                [p[0], p[1], p[5], p[4]],  # 前面
+                [p[2], p[3], p[7], p[6]],  # 后面
+                [p[0], p[3], p[7], p[4]],  # 左面
+                [p[1], p[2], p[6], p[5]],  # 右面
+            ]
+            poly_sides = Poly3DCollection(side_faces, alpha=0.78, linewidth=0.6,
+                                          edgecolor='#333333', facecolor=face_color)
+            ax.add_collection3d(poly_sides)
+
+            # 顶面 (单独画，比较浅以突出防爆阀)
+            top_face = [[p[4], p[5], p[6], p[7]]]
+            poly_top = Poly3DCollection(top_face, alpha=0.55, linewidth=0.6,
+                                        edgecolor='#222', facecolor=face_color)
+            ax.add_collection3d(poly_top)
+
+            # 底面
+            bot_face = [[p[0], p[1], p[2], p[3]]]
+            poly_bot = Poly3DCollection(bot_face, alpha=0.55, linewidth=0.4,
+                                        edgecolor='#444', facecolor=cmap(norm(max(tr-2, 0))))
+            ax.add_collection3d(poly_bot)
+
+            # ── 防爆阀：圆柱顶在顶面中心 ──
+            vcx, vcy, vcz = x0 + Lx/2, y0 + Ly/2, z0 + Lz
+            valve_r = 0.012  # 12mm 半径——明显可见
+            valve_h = 0.006  # 突起 6mm
+            segs = 20
+            theta = np.linspace(0, 2*np.pi, segs+1)
+            vx = vcx + valve_r * np.cos(theta)
+            vy = vcy + valve_r * np.sin(theta)
+            vzb = np.full_like(vx, vcz)
+            vzt = np.full_like(vx, vcz + valve_h)
+
+            # 圆柱侧面 (梯形带)
+            for i in range(segs):
+                quad = [
+                    (vx[i],   vy[i],   vzb[i]),
+                    (vx[i+1], vy[i+1], vzb[i+1]),
+                    (vx[i+1], vy[i+1], vzt[i+1]),
+                    (vx[i],   vy[i],   vzt[i]),
+                ]
+                ax.add_collection3d(Poly3DCollection(
+                    [quad], alpha=0.95, facecolor='#cc2222', edgecolor='#770000',
+                    linewidth=0.5))
+
+            # 阀盖 (顶部圆)
+            for i in range(1, segs):
+                tri = [
+                    (vx[0], vy[0], vzt[0]),
+                    (vx[i], vy[i], vzt[i]),
+                    (vx[i+1], vy[i+1], vzt[i+1]),
+                ]
+                ax.add_collection3d(Poly3DCollection(
+                    [tri], alpha=1.0, facecolor='#dd3333', edgecolor='#770000',
+                    linewidth=0.4))
+
+            # 阀底盘 (贴顶面的小圆环以加强视觉)
+            for i in range(segs):
+                quad = [
+                    (vx[i],   vy[i],   vcz),
+                    (vx[i+1], vy[i+1], vcz),
+                    (vx[i+1]*0.98 - vcx*0.02 + vcx, vy[i+1]*0.98 - vcy*0.02 + vcy, vcz),
+                    (vx[i]*0.98 - vcx*0.02 + vcx, vy[i]*0.98 - vcy*0.02 + vcy, vcz),
+                ]
+                # 简化：直接画一个稍微下沉的圆盘，提升视觉层次
+
+            # ── 文本：前立面标注 + 顶面角编号 ──
+            ax.text(x0 + 0.002, y0 + Ly/2, z0 + Lz*0.5,
+                    f'bat{idx+1}', ha='left', va='center', fontsize=8,
+                    fontweight='bold', color='white', zorder=10)
+            ax.text(vcx, vcy, vcz + valve_h + 0.003, f'#{idx+1}',
+                    ha='center', va='bottom', fontsize=7, color='#aa0000',
+                    fontweight='bold')
+
+    # 颜色条
+    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+    sm.set_array([])
+    cbar = fig.colorbar(sm, ax=ax, shrink=0.55, pad=0.07)
+    cbar.set_label('温升 ΔT (=T-T_amb) [K]', fontsize=10)
+
+    # 轴标签
+    ax.set_xlabel('X - 宽度方向 [m]', fontsize=9)
+    ax.set_ylabel('Y - 厚度方向 [m]', fontsize=9)
+    ax.set_zlabel('Z - 高度 [m]', fontsize=9)
+
+    # 自适应轴范围
+    x_span = (cell_L * n_rows + gap_X * (n_rows-1))
+    y_span = (cell_W * n_cols + gap_Y * (n_cols-1))
+    z_span = cell_H
+    pad = 0.03
+    ax.set_xlim(-x_span/2 - pad, x_span/2 + pad)
+    ax.set_ylim(-y_span/2 - pad, y_span/2 + pad)
+    ax.set_zlim(-pad, z_span * 1.18)
+
+    # 关闭默认网格、加粗轴
+    ax.grid(True, alpha=0.3)
+    ax.xaxis.pane.fill = False
+    ax.yaxis.pane.fill = False
+    ax.zaxis.pane.fill = False
+
+    # 图例
+    legend_handles = [
+        mpatches.Patch(color='#cc2222', label='防爆阀 (顶部)'),
+        mpatches.Patch(color='#5a8ac9', alpha=0.78, label='电芯壳体 (按ΔT着色)'),
+    ]
+    ax.legend(handles=legend_handles, loc='upper left',
+              fontsize=9, framealpha=0.95)
+
+    T_min_rise, T_max_rise = T_rise.min(), T_rise.max()
+    ax.set_title(f'8S 电池包 · 2×4 排布 · 末态温度场  '
+                 f'(T_amb={T_amb:.0f}K, ΔT 范围 {T_min_rise:.1f} ~ {T_max_rise:.1f}K)',
+                 fontsize=12, fontweight='bold')
+
+    fig.tight_layout(rect=[0, 0, 0.95, 1])
+    fig.savefig(save_path, dpi=140, bbox_inches='tight')
+    plt.close(fig)
+
 
 if __name__ == "__main__":
     main()
