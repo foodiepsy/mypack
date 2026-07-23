@@ -55,9 +55,13 @@ class ECMCellSpec:
         N 个 RC 支路的电阻，每个为 (T, I, SoC) -> Ohm 的函数/查表。
     C : list
         N 个 RC 支路的电容，每个为 (T, I, SoC) -> F 的函数/查表。
-    dUdT : 可选, (T, SoC) -> V/K
-        熵变系数，用于计算可逆热 Q_rev = -I·T·dUdT。None 表示忽略。
-    soc_init, T_init : float
+        dUdT : 可选, (T, SoC) -> V/K
+            熵变系数，用于计算可逆热 Q_rev = -I·T·dUdT。None 表示忽略。
+        R_contact : 标量或 (T,I,SoC) 可调用 [Ω]
+            外部连接电阻（tab/焊接/busbar），附加到 R0 外侧。
+            产热 Q_cr = I²·R_contact，端电压 Vt = V_behind_R0 - I·(R0+R_contact)。
+            默认 0.0（无连接电阻）。
+        soc_init, T_init : float
         初始荷电状态(0~1) 与初始温度(K)。
     diffusion : bool
         是否启用 ECMD 扩散过电势（分布 SoC 1D PDE）。
@@ -75,6 +79,7 @@ class ECMCellSpec:
         R=None,
         C=None,
         dUdT=None,
+        R_contact=0.0,
         soc_init=1.0,
         T_init=298.15,
         diffusion=False,
@@ -94,6 +99,7 @@ class ECMCellSpec:
         self.R = [as_callable(r) for r in R]
         self.C = [as_callable(c) for c in C]
         self.dUdT = as_callable(dUdT) if dUdT is not None else None
+        self.R_contact = as_callable(R_contact)
         self.n_rc = len(R)
         self.soc_init = float(soc_init)
         self.T_init = float(T_init)
@@ -117,6 +123,7 @@ class ECMCellSpec:
             R=self.R,
             C=self.C,
             dUdT=self.dUdT,
+            R_contact=self.R_contact,
             soc_init=self.soc_init,
             T_init=self.T_init,
             diffusion=self.diffusion,

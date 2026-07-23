@@ -88,8 +88,9 @@ class Pack:
             cell = self.cells[idx]
             self.netlist.df.at[self.v_rows[k], "value"] = cell.voltage_behind_R0()
             Td = cell.T - 273.15
-            R0 = cell.spec.R0(Td, 0.0, cell.soc)
-            self.netlist.df.at[self.ri_rows[k], "value"] = R0
+            R0_raw = cell.spec.R0(Td, 0.0, cell.soc)
+            Rc = float(cell.spec.R_contact(Td, 0.0, cell.soc))
+            self.netlist.df.at[self.ri_rows[k], "value"] = R0_raw + Rc
         # 温度同步（新接入电芯的温度对齐到电芯对象）
         if self.thermal is not None:
             for k, idx in enumerate(self.active):
@@ -99,8 +100,9 @@ class Pack:
         for k, idx in enumerate(self.active):
             cell = self.cells[idx]
             Td = cell.T - 273.15
-            R0 = cell.spec.R0(Td, I_prev[k], cell.soc)
-            self.netlist.df.at[self.ri_rows[k], "value"] = R0
+            R0_raw = cell.spec.R0(Td, I_prev[k], cell.soc)
+            Rc = float(cell.spec.R_contact(Td, I_prev[k], cell.soc))
+            self.netlist.df.at[self.ri_rows[k], "value"] = R0_raw + Rc
 
     def solve(
         self,
@@ -276,7 +278,9 @@ class Pack:
                 soc[idx] = cell.soc
                 T[idx] = cell.T
                 Rint[idx] = abs((cell.voltage_behind_R0() + I * R0 - Vt) / (I + 1e-12))
-                Q[idx] = cell.heat(I, R0)
+                Td_cell = cell.T - 273.15
+                Rc = float(cell.spec.R_contact(Td_cell, I, cell.soc))
+                Q[idx] = cell.heat(I, R0) + I**2 * Rc
             # 未接入电芯：保持冻结状态
             for idx in range(N):
                 if idx not in active_set:

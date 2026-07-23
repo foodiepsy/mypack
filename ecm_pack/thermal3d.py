@@ -23,7 +23,7 @@ from scipy.sparse.linalg import spsolve
 
 class CellThermalModel:
     """
-    单个电芯的多维热模型（1D/2D/3D 可切换）。
+    单个电芯的多维热模型（1D/2D/3D 可切换，支持非对称冷却）。
 
     参数
     ----
@@ -40,17 +40,34 @@ class CellThermalModel:
     k : float 或 (kx,ky,kz) [W/(m·K)]
         导热系数。标量=各向同性；三元组=各向异性。
         约定：kx=X(宽度)方向, ky=Y(厚度)方向, kz=Z(高度)方向。
-    h : float [W/(m²·K)]
-        暴露面对环境的对流换热系数。
+    h : float / 6-tuple / dict [W/(m²·K)]
+        各面对环境的对流换热系数。支持三种格式：
+          - 标量: 6 个面统一（向后兼容）
+          - 6-元组: (h_x0,h_x1,h_y0,h_y1,h_z0,h_z1)
+          - dict: {'x0':20,'x1':5, ...} 或带 'default' 键回退
+        面命名约定:
+          x0 = X=0 面(i==0)  x1 = X=Lx 面(i==nx-1)
+          y0 = Y=0 面(j==0)  y1 = Y=Ly 面(j==ny-1)
+          z0 = Z=0 面(k==0)  z1 = Z=Lz 面(k==nz-1)
+        典型场景: 水冷板在 x0 面 (h=200),其余自然对流 (h=5)
     T_amb : float 或 callable(t)->K
         环境温度，可随时间变化。
     T_init : float [K]
         初始温度（均匀）。
+    R_shell : float [K/W], 可选
+        电芯壳层热阻（体→表面的热阻）。>0 时在 FVM 解之后额外计算表面温度
+        T_surface 供 BMS 传感器对标。默认 0.0（体温度即为表面温度）。
 
     属性
     ----
     T : ndarray
         温度场（展平为一维数组，长度 = 活跃网格点数）。
+    h_faces : tuple (hx0,hx1,hy0,hy1,hz0,hz1)
+        各面对流系数。
+    T_surface : float  [K]
+        壳层/表面温度（当 R_shell>0 时，为从体平均温度反推的表面温度）。
+    T_core_max : float  [K]
+        电芯体最高温度（= T_max，同样从 FVM 场获取）。
     """
 
     def __init__(
@@ -60,6 +77,7 @@ class CellThermalModel:
         nx=6, ny=6, nz=10,
         rho=2300.0, cp=1000.0, k=1.5,
         h=5.0, T_amb=298.15, T_init=298.15,
+        R_shell=0.0,
     ):
         self.Lx, self.Ly, self.Lz = float(Lx), float(Ly), float(Lz)
         self.dim = int(dim)
@@ -71,9 +89,10 @@ class CellThermalModel:
             self.kx = self.ky = self.kz = float(k)
         else:
             self.kx, self.ky, self.kz = (float(v) for v in k)
-        self.h = float(h)
+        self._h_faces = self._parse_h(h)
         self.T_amb = T_amb
         self.T_init = float(T_init)
+        self.R_shell = max(0.0, float(R_shell))
 
         # 按 dim 截断网格：低于 dim 的方向只取 1 个节点
         self.nx = max(int(nx), 2) if self.dim >= 1 else 1
@@ -91,33 +110,42 @@ class CellThermalModel:
         self._A = None
         self._A_dt = None
         self._V_cell = None
-        self._boundary_cache = None  # 缓存边界节点的对流面积
+        self._boundary_hA_cache = None  # 缓存每节点的 Σ(h_face·A_face)
+        self._h_total = 0.0              # 总对流导 [W/K] = Σ(h_face·A_face)
+        self._T_surface = float(T_init)  # 壳层温度（R_shell>0 时有意义）
+
+    @staticmethod
+    def _parse_h(h):
+        """将 h 统一解析为 (h_x0,h_x1,h_y0,h_y1,h_z0,h_z1) 六元组。"""
+        if isinstance(h, (int, float, np.number)):
+            h = float(h)
+            return (h, h, h, h, h, h)
+        if isinstance(h, str):
+            raise TypeError(f"h 参数不能为字符串，收到: {repr(h)}")
+        if isinstance(h, dict):
+            default = float(h.get("default", 5.0))
+            return tuple(float(h.get(k, default))
+                         for k in ("x0", "x1", "y0", "y1", "z0", "z1"))
+        if isinstance(h, (list, tuple)):
+            if len(h) == 6:
+                return tuple(float(v) for v in h)
+            raise ValueError(f"h 元组必须为 6 元素，收到 {len(h)}")
+        raise TypeError(f"h 参数类型不支持: {type(h)}")
+
+    @property
+    def h_faces(self):
+        """返回各面对流系数的六元组 (hx0,hx1,hy0,hy1,hz0,hz1)。"""
+        return self._h_faces
 
     def _idx(self, i, j, k):
         return i * self.ny * self.nz + j * self.nz + k
 
-    def _is_boundary(self, i, j, k):
-        """返回该节点的暴露面总对流面积 [m²]。"""
-        Ax = self.dy * self.dz
-        Ay = self.dx * self.dz
-        Az = self.dx * self.dy
-        area = 0.0
-        if self.nx > 1:
-            if i == 0 or i == self.nx - 1:
-                area += Ax
-        if self.ny > 1:
-            if j == 0 or j == self.ny - 1:
-                area += Ay
-        if self.nz > 1:
-            if k == 0 or k == self.nz - 1:
-                area += Az
-        return area
-
     def _build_matrix(self, dt):
-        """构建隐式欧拉矩阵 A（正定对角占优）与边界面积缓存。"""
+        """构建隐式欧拉矩阵 A，缓存每节点的 Σ(h_face·A_face)。"""
         nx, ny, nz = self.nx, self.ny, self.nz
         dx, dy, dz = self.dx, self.dy, self.dz
         kx, ky, kz = self.kx, self.ky, self.kz
+        hx0, hx1, hy0, hy1, hz0, hz1 = self._h_faces
 
         V = dx * dy * dz
         Ax = dy * dz
@@ -125,7 +153,7 @@ class CellThermalModel:
         Az = dx * dy
 
         rows, cols, vals = [], [], []
-        boundary_areas = np.zeros(self.N)
+        boundary_hA = np.zeros(self.N)         # 缓存 hA = Σ(h_face·area_face)
 
         for i in range(nx):
             for j in range(ny):
@@ -164,10 +192,25 @@ class CellThermalModel:
                             rows.append(n); cols.append(self._idx(i, j, k+1))
                             vals.append(-dt * g); diag_val += dt * g
 
-                    # 对流边界
-                    bnd_area = self._is_boundary(i, j, k)
-                    diag_val += dt * self.h * bnd_area
-                    boundary_areas[n] = bnd_area
+                    # ─── 对流边界（面差异化 h）───
+                    hA_node = 0.0
+                    if nx > 1:
+                        if i == 0:
+                            hA_node += hx0 * Ax
+                        if i == nx - 1:
+                            hA_node += hx1 * Ax
+                    if ny > 1:
+                        if j == 0:
+                            hA_node += hy0 * Ay
+                        if j == ny - 1:
+                            hA_node += hy1 * Ay
+                    if nz > 1:
+                        if k == 0:
+                            hA_node += hz0 * Az
+                        if k == nz - 1:
+                            hA_node += hz1 * Az
+                    diag_val += dt * hA_node
+                    boundary_hA[n] = hA_node
 
                     rho_cp_V = self.rho * self.cp * V
                     rows.append(n); cols.append(n)
@@ -176,7 +219,16 @@ class CellThermalModel:
         self._A = csr_matrix((vals, (rows, cols)), shape=(self.N, self.N))
         self._A_dt = dt
         self._V_cell = V
-        self._boundary_cache = boundary_areas
+        self._boundary_hA_cache = boundary_hA
+        # 缓存总对流导 h_total [W/K]：每面 = h_face × 物理面积
+        h_total = 0.0
+        if nx > 1:
+            h_total += (hx0 + hx1) * self.Ly * self.Lz
+        if ny > 1:
+            h_total += (hy0 + hy1) * self.Lx * self.Lz
+        if nz > 1:
+            h_total += (hz0 + hz1) * self.Lx * self.Ly
+        self._h_total = h_total
         return self._A
 
     def step(self, Q_total, dt, t=None):
@@ -196,21 +248,33 @@ class CellThermalModel:
         V = self._V_cell
         rho_cp_V = self.rho * self.cp * V
         rhs = rho_cp_V * self.T + dt * q_vol * V
-        # 对流边界贡献：+ dt·h·A_bnd·T_amb
-        rhs += dt * self.h * self._boundary_cache * Tamb
+        # 对流边界贡献（面差异化 h）：+ dt·Σ(h_face·A_face)·T_amb
+        rhs += dt * self._boundary_hA_cache * Tamb
 
         self.T = spsolve(self._A, rhs)
         self._t = t
+
+        # ─── 壳层表面温度（R_shell>0 时计算）───
+        if self.R_shell > 0 and self._h_total > 0:
+            T_avg = float(self.T.mean())
+            inv_R = 1.0 / self.R_shell
+            self._T_surface = (T_avg * inv_R + self._h_total * Tamb) / (inv_R + self._h_total)
+        else:
+            self._T_surface = float(self.T.mean())
         return self.T
 
     def temperature_stats(self):
-        """返回温度场统计：最高、最低、平均、最大温差。"""
-        return {
+        """返回温度场统计：最高、最低、平均、最大温差，及表面温度和体心最高温。"""
+        stats = {
             "T_max [K]": float(self.T.max()),
             "T_min [K]": float(self.T.min()),
             "T_avg [K]": float(self.T.mean()),
             "dT_max [K]": float(self.T.max() - self.T.min()),
         }
+        if self.R_shell > 0:
+            stats["T_surface [K]"] = self._T_surface
+            stats["T_core_max [K]"] = float(self.T.max())
+        return stats
 
     @property
     def T_avg(self):
@@ -220,6 +284,21 @@ class CellThermalModel:
     def T_max(self):
         return float(self.T.max())
 
+    @property
+    def T_surface(self):
+        """壳层表面温度 [K]。R_shell>0 时电芯内部体平均温度与外壳之差由 R_shell 决定。"""
+        return self._T_surface
+
+    @property
+    def T_core_max(self):
+        """电芯内部最高温度 [K]（即体温度场的最大值）。"""
+        return float(self.T.max())
+
+    @property
+    def h_total(self):
+        """总对流导 [W/K] = Σ(h_face × A_face)。"""
+        return self._h_total
+
     def reshape(self):
         """返回温度场数组，形状按 dim 对应 (nx,)/ (nx,ny)/ (nx,ny,nz)。"""
         if self.dim == 1:
@@ -228,6 +307,164 @@ class CellThermalModel:
             return self.T.reshape(self.nx, self.ny)
         else:
             return self.T.reshape(self.nx, self.ny, self.nz)
+
+    # ─────────── 热场可视化 ───────────
+
+    def plot_slice(self, plane="xy", position=0.5, ax=None,
+                   cmap="hot", show_colorbar=True, **kwargs):
+        """绘制温度场的指定截面 heatmap。
+
+        参数
+        ----
+        plane : 'xy' | 'xz' | 'yz'
+            截面平面。1D 模型忽略此参数（画 1D 曲线）。
+        position : float (0~1) 或 int
+            截面位置（分数或索引）。默认 0.5（中截面）。
+        ax : matplotlib Axes, 可选
+            若提供则绘制到该轴。
+        cmap : str
+            色图名称，默认 'hot'。
+        show_colorbar : bool
+            是否显示色标。
+
+        返回 fig, ax。
+        """
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError:
+            raise ImportError("plot_slice 需要 matplotlib")
+
+        if self.dim == 1:
+            # 1D：画温度随 X 的曲线
+            if ax is None:
+                _, ax = plt.subplots(figsize=(6, 3))
+            x_vals = np.linspace(0, self.Lx * 1000, self.nx)  # mm
+            ax.plot(x_vals, self.T, "o-", color="darkred", lw=1.5, ms=4, **kwargs)
+            ax.set(xlabel="X 位置 [mm]", ylabel="温度 [K]",
+                   title=f"1D 温度分布 (t={self._t:.1f}s)")
+            ax.grid(alpha=0.3)
+            return ax.figure, ax
+
+        T3d = self.reshape()
+        nd = T3d.ndim if hasattr(T3d, "ndim") else \
+            (1 if self.dim == 1 else (2 if self.dim == 2 else 3))
+
+        # 确定切片索引
+        if plane not in ("xy", "xz", "yz"):
+            raise ValueError(f"plane 必须为 'xy'/'xz'/'yz'，收到 {plane!r}")
+
+        if plane == "xy":
+            if nd < 3 or self.nz <= 1:
+                slc = T3d
+                extent = (0, self.Lx * 1000, 0, self.Ly * 1000)
+                xy_label = ("X [mm]", "Y [mm]")
+                title = f"温度场 (t={self._t:.1f}s)"
+            else:
+                idx = _slice_index(self.nz, position)
+                slc = T3d[:, :, idx]
+                pos_mm = idx / (self.nz - 1) * self.Lz * 1000
+                extent = (0, self.Lx * 1000, 0, self.Ly * 1000)
+                xy_label = ("X [mm]", "Y [mm]")
+                title = f"T @ Z={pos_mm:.1f}mm (t={self._t:.1f}s)"
+        elif plane == "xz":
+            if nd < 3 or self.ny <= 1:
+                slc = T3d if nd == 2 else T3d[:, 0, :]
+                extent = (0, self.Lx * 1000, 0, self.Lz * 1000)
+                xy_label = ("X [mm]", "Z [mm]")
+                title = f"温度场 (t={self._t:.1f}s)"
+            else:
+                idx = _slice_index(self.ny, position)
+                slc = T3d[:, idx, :]
+                pos_mm = idx / (self.ny - 1) * self.Ly * 1000
+                extent = (0, self.Lx * 1000, 0, self.Lz * 1000)
+                xy_label = ("X [mm]", "Z [mm]")
+                title = f"T @ Y={pos_mm:.1f}mm (t={self._t:.1f}s)"
+        else:  # yz
+            if nd < 3 or self.nx <= 1:
+                slc = T3d.T if nd == 2 else T3d[0, :, :]
+                extent = (0, self.Ly * 1000, 0, self.Lz * 1000)
+                xy_label = ("Y [mm]", "Z [mm]")
+                title = f"温度场 (t={self._t:.1f}s)"
+            else:
+                idx = _slice_index(self.nx, position)
+                slc = T3d[idx, :, :]
+                pos_mm = idx / (self.nx - 1) * self.Lx * 1000
+                extent = (0, self.Ly * 1000, 0, self.Lz * 1000)
+                xy_label = ("Y [mm]", "Z [mm]")
+                title = f"T @ X={pos_mm:.1f}mm (t={self._t:.1f}s)"
+
+        if ax is None:
+            _, ax = plt.subplots(figsize=(5, 4))
+        im = ax.imshow(slc.T, origin="lower", aspect="auto", extent=extent,
+                       cmap=cmap, **kwargs)
+        ax.set(xlabel=xy_label[0], ylabel=xy_label[1])
+        ax.set_title(title if "title" in dir() else f"温度场 (t={self._t:.1f}s)")
+
+        if show_colorbar and hasattr(im, "figure") and im.figure is not None:
+            plt.colorbar(im, ax=ax, label="温度 [K]")
+        return ax.figure, ax
+
+    def plot_summary(self, save_path=None, dpi=120):
+        """生成热场概览图：1D/2D/3D 的可视化摘要。
+
+        参数
+        ----
+        save_path : str, 可选
+            保存路径。
+        dpi : int
+
+        返回 fig。
+        """
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError:
+            raise ImportError("plot_summary 需要 matplotlib")
+
+        if self.dim == 1:
+            fig, ax = plt.subplots(figsize=(7, 3))
+            self.plot_slice(ax=ax)
+            stats = self.temperature_stats()
+            info = (f"T_avg={stats['T_avg [K]']:.2f}K  "
+                    f"T_max={stats['T_max [K]']:.2f}K  "
+                    f"ΔT={stats['dT_max [K]']:.3f}K")
+            ax.set_title(f"1D 温度场 · {info}")
+            fig.tight_layout()
+        elif self.dim == 2:
+            fig, ax = plt.subplots(figsize=(6, 5))
+            self.plot_slice(plane="xy", ax=ax)
+            stats = self.temperature_stats()
+            info = (f"T_avg={stats['T_avg [K]']:.2f}K  "
+                    f"T_max={stats['T_max [K]']:.2f}K  "
+                    f"ΔT={stats['dT_max [K]']:.3f}K")
+            ax.set_title(f"2D(XY)温度场 · {info}")
+            fig.tight_layout()
+        else:
+            fig, axes = plt.subplots(1, 3, figsize=(14, 4))
+            for ax_i, plane in zip(axes, ("xy", "xz", "yz")):
+                self.plot_slice(plane=plane, ax=ax_i)
+            stats = self.temperature_stats()
+            extra = ""
+            if "T_surface [K]" in stats:
+                extra = (f"  T_surface={stats['T_surface [K]']:.2f}K"
+                         f"  T_core_max={stats['T_core_max [K]']:.2f}K")
+            fig.suptitle(
+                f"三维温度场 (dim={self.dim}, t={self._t:.1f}s)  "
+                f"T_avg={stats['T_avg [K]']:.2f}K  "
+                f"ΔT_max={stats['dT_max [K]']:.3f}K{extra}",
+                fontsize=11,
+            )
+            fig.tight_layout(rect=[0, 0, 1, 0.92])
+
+        if save_path:
+            fig.savefig(save_path, dpi=dpi)
+        return fig
+
+
+def _slice_index(n, pos):
+    """辅助：将分数位置转为切片索引。"""
+    if isinstance(pos, int):
+        return max(0, min(pos, n - 1))
+    return max(0, min(int(round(pos * (n - 1))), n - 1))
 
 
 # 向后兼容别名

@@ -26,9 +26,14 @@ class ThermalNetwork:
         电芯间导热。None=无相互导热；
         list 形式给出每条导热带 (i,j,导热系数)；
         ndarray 形式直接给出完整的对称导热矩阵 G。
+    interface_resistance : list of (i, j, R_th, A_contact), 可选
+        层间热接触电阻。每个元素为 (电芯i, 电芯j, R_th[K·m²/W], 接触面积A[m²])。
+        自动换算为等效导热 G = A/R_th，叠加到 conduction 中。
+        典型值：导热硅胶垫 R_th≈0.5~5 K·cm²/W，气隙 R_th≈20~100 K·cm²/W。
     """
 
-    def __init__(self, n_cells, C_th, h=None, T_amb=298.15, conduction=None, T_init=298.15):
+    def __init__(self, n_cells, C_th, h=None, T_amb=298.15, conduction=None,
+                 interface_resistance=None, T_init=298.15):
         self.n = int(n_cells)
         self.C_th = np.atleast_1d(np.asarray(C_th, dtype=float))
         if self.C_th.size == 1:
@@ -38,6 +43,26 @@ class ThermalNetwork:
             self.h = np.full(self.n, self.h.item())
         self.T_amb = T_amb
         self.T = np.full(self.n, float(T_init))
+
+        # 将层间热接触电阻换算为等效导热，与 conduction 合并
+        if interface_resistance is not None:
+            if conduction is None:
+                conduction = []
+            elif isinstance(conduction, np.ndarray):
+                raise ValueError(
+                    "interface_resistance 与 ndarray 形式的 conduction 不能同时使用"
+                )
+            else:
+                conduction = list(conduction)
+            for entry in interface_resistance:
+                i, j, R_th = entry[0], entry[1], float(entry[2])
+                A = float(entry[3]) if len(entry) >= 4 else None
+                if A is None or A <= 0:
+                    raise ValueError(
+                        f"interface_resistance 条目 ({i},{j},R_th) 需提供有效接触面积 A"
+                    )
+                G = A / R_th if R_th > 0 else 1e9
+                conduction.append((i, j, G))
         self._build_conduction(conduction)
 
     def _build_conduction(self, conduction):
