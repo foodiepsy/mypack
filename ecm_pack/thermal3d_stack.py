@@ -373,10 +373,12 @@ class StackThermal3D:
                      title=None, save_path=None, dpi=130):
         """Draw a true 3D rendering of the whole 1xN stack.
 
-        Shows each cell as a solid block coloured by bulk temperature, foam pads
-        on the faces listed in ``foam_faces``, a plastic sheet on the top face
-        (y=0), and an adiabatic marker on the bottom face (y=n*Ly).
-        All labels are ASCII-only to avoid encoding issues.
+        Each cell's six faces are coloured by the local 3D temperature
+        field (so internal gradients -- e.g. a foam face running hotter
+        than the bare-air face -- are visible). Foam pads on the faces
+        listed in ``foam_faces``, a plastic sheet on the top face (y=0),
+        and an air-convection / adiabatic marker on the bottom face
+        (y=n*Ly). All labels are ASCII-only to avoid encoding issues.
         """
         from mpl_toolkits.mplot3d.art3d import Poly3DCollection, Line3DCollection
         import matplotlib.pyplot as plt
@@ -391,9 +393,13 @@ class StackThermal3D:
         Lx, Ly, Lz = self.Lx, self.Ly, self.Lz
         n = self.n_cells
 
-        # temperature -> colour mapping (use a copy to avoid surprise updates)
-        T = np.asarray(self.T, dtype=float).copy()
-        Tmin, Tmax = float(T.min()), float(T.max())
+        # temperature -> colour mapping
+        # use the FULL 3D field so internal gradients (e.g. the foam
+        # face being hotter than the bare-air face) are visible
+        from scipy.ndimage import zoom
+        Tfield = self.T_field.reshape(self.NX, self.NY, self.NZ)
+        T = np.asarray(self.T, dtype=float).copy()   # bulk, for title dT
+        Tmin, Tmax = float(Tfield.min()), float(Tfield.max())
         norm = plt.Normalize(Tmin, Tmax)
         sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
         sm.set_array([])
@@ -414,30 +420,71 @@ class StackThermal3D:
                                  edgecolors=edgecolor,
                                  linewidths=lw, alpha=alpha))
 
-        # ---- cell blocks ----
+        # ---- cell blocks: colour each face by the 3D field (shows gradients) ----
+        ny = self.ny
+        nxv, nzv = 10, 10   # visual refinement of the cross-section grid
+
+        def block_faces(y0, y1, Tblk):
+            # Tblk shape (NX, ny, NZ); zoom X->nxv, Z->nzv, keep Y
+            Tz = zoom(Tblk.astype(float),
+                        (nxv / self.NX, 1.0, nzv / self.NZ), order=1)
+            polys, cols = [], []
+            dx = Lx / nxv
+            dz = Lz / nzv
+            dy = (y1 - y0) / ny
+            # X faces (x=0 and x=Lx): grid over (y, z)
+            for xi, xpos in ((0, 0.0), (nxv - 1, Lx)):
+                for a in range(ny):
+                    for b in range(nzv):
+                        yy0 = y0 + a * dy
+                        yy1 = y0 + (a + 1) * dy
+                        zz0 = b * dz
+                        zz1 = (b + 1) * dz
+                        polys.append([
+                            [xpos, yy0, zz0], [xpos, yy1, zz0],
+                            [xpos, yy1, zz1], [xpos, yy0, zz1],
+                        ])
+                        cols.append(Tz[xi, a, b])
+            # Z faces (z=0 and z=Lz): grid over (x, y)
+            for zi, zpos in ((0, 0.0), (nzv - 1, Lz)):
+                for c2 in range(nxv):
+                    for a in range(ny):
+                        xx0 = c2 * dx
+                        xx1 = (c2 + 1) * dx
+                        yy0 = y0 + a * dy
+                        yy1 = y0 + (a + 1) * dy
+                        polys.append([
+                            [xx0, yy0, zpos], [xx1, yy0, zpos],
+                            [xx1, yy1, zpos], [xx0, yy1, zpos],
+                        ])
+                        cols.append(Tz[c2, a, zi])
+            # Y faces (top y0 and bottom y1): grid over (x, z)
+            for yi, ypos in ((0, y0), (ny - 1, y1)):
+                for c2 in range(nxv):
+                    for b in range(nzv):
+                        xx0 = c2 * dx
+                        xx1 = (c2 + 1) * dx
+                        zz0 = b * dz
+                        zz1 = (b + 1) * dz
+                        polys.append([
+                            [xx0, ypos, zz0], [xx1, ypos, zz0],
+                            [xx1, ypos, zz1], [xx0, ypos, zz1],
+                        ])
+                        cols.append(Tz[c2, yi, b])
+            return polys, cols
+
         for c in range(n):
             y0 = c * Ly
             y1 = y0 + Ly
-            x0, x1 = 0.0, Lx
-            z0, z1 = 0.0, Lz
-            color = sm.to_rgba(T[c])
-
-            v = [
-                [x0, y0, z0], [x1, y0, z0], [x1, y1, z0], [x0, y1, z0],
-                [x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1],
-            ]
-            faces = [
-                [v[0], v[1], v[2], v[3]],  # z = z0
-                [v[4], v[5], v[6], v[7]],  # z = z1
-                [v[0], v[1], v[5], v[4]],  # y = y0  (top)
-                [v[2], v[3], v[7], v[6]],  # y = y1  (bottom)
-                [v[0], v[3], v[7], v[4]],  # x = x0
-                [v[1], v[2], v[6], v[5]],  # x = x1
-            ]
-            for f in faces:
-                add_face(f, color)
-            # cell label on top face (y=0), black text for readability
-            ax.text(Lx * 0.5, y0 + 0.002, Lz * 0.5,
+            j0 = c * ny
+            Tblk = Tfield[:, j0:j0 + ny, :]
+            polys, cols = block_faces(y0, y1, Tblk)
+            fc = sm.to_rgba(np.asarray(cols))
+            ax.add_collection3d(
+                Poly3DCollection(polys, facecolors=fc,
+                                 edgecolors=fc, linewidths=0.0, alpha=1.0))
+            # cell label on top-face centre
+            ax.text(Lx * 0.5, y0 + 0.001, Lz * 0.5,
                     f"bat{c + 1}", color="black", fontsize=8,
                     ha="center", va="center", fontweight="bold")
 
@@ -641,6 +688,7 @@ class StackThermal3D:
         air_faces = sorted({"x0", "x1", "z0", "z1"} - set(self.foam_faces))
         air_str = ",".join(air_faces) if air_faces else "none"
         bc_text = (
+            f"Faces coloured by 3D T_field\n"
             f"Foam sides: {foam_str}\n"
             f"Bare-air sides: {air_str}\n"
             f"Top (y=0): plastic({self.k_top:.2f}W/mK,d={self.d_top*1e3:.1f}mm)+air\n"
@@ -657,12 +705,14 @@ class StackThermal3D:
         if title is None:
             bot_word = ("air bottom" if self.h_bottom > 0.0
                          else "adiabatic bottom")
+            dT_bulk = float(np.max(T) - np.min(T))
             title = (
                 f"8S Pack 3D | stack along Y | foam={sorted(self.foam_faces)} | "
-                f"plastic top | {bot_word} | T_amb={self.T_amb:.2f}K | "
-                f"dT_pack={Tmax - Tmin:.3f}K"
+                f"plastic top | {bot_word}\n"
+                f"T_amb={self.T_amb:.2f}K | dT_bulk={dT_bulk:.3f}K | "
+                f"T_field=[{Tmin:.2f},{Tmax:.2f}]K"
             )
-        ax.set_title(title, fontsize=11)
+        ax.set_title(title, fontsize=10)
 
         fig.tight_layout()
         if save_path:
