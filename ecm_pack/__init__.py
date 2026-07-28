@@ -4,6 +4,7 @@ from .ecm import ECMCellSpec, ECMCell
 from .circuit import Netlist, solve_circuit, setup_circuit, setup_two_group, setup_series_bypass
 from .thermal import ThermalNetwork
 from .thermal3d import CellThermalModel, Cell3DThermal
+from .thermal3d_stack import StackThermal3D
 from .defaults import cell_314ah_spec, make_ocv_314ah, R0_314ah, R1_314ah, C1_314ah, dUdT_314ah
 from .pack import Pack
 
@@ -11,7 +12,7 @@ __all__ = [
     "lookup_1d", "lookup_nd", "as_callable", "build_3d_table",
     "ECMCellSpec", "ECMCell",
     "Netlist", "solve_circuit", "setup_circuit", "setup_two_group", "setup_series_bypass",
-    "ThermalNetwork", "CellThermalModel", "Cell3DThermal",
+    "ThermalNetwork", "CellThermalModel", "Cell3DThermal", "StackThermal3D",
     "cell_314ah_spec", "make_ocv_314ah", "R0_314ah", "R1_314ah", "C1_314ah", "dUdT_314ah",
     "Pack",
 ]
