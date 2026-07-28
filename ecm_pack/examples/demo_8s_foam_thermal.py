@@ -1,15 +1,17 @@
-# demo_8s_foam_thermal.py  ——  8S 大面背靠背串联 + 全泡棉 + 三维非对称冷却仿真
+# demo_8s_foam_thermal.py  ——  8S 大面背靠背串联 + 薄侧泡棉 + 三维非对称冷却仿真
 #
 # 物理布局: 8 颗 314Ah 电芯沿厚度方向(Y) 大面背靠背排成 1×8 串联，
-#           相邻大面（XZ 面, 0.174×0.207=0.036 m?）之间夹 1mm EVA/PE 泡棉，共 7 个界面。
-#           即「电芯—泡棉—电芯—泡棉—…—电芯」的一条堆叠链。
+#           电芯之间「直接贴合，没有泡棉」；泡棉只贴在电芯「薄侧」——
+#           即侧向的 X 面 与 Z 面(小面)，泡棉外侧再接空气自然对流。
+#           (按用户修正：泡棉不在电芯之间，而在薄侧与空气连接)
 #
 # 三维热模型 StackThermal3D(thermal3d_stack.py):
-#   把 8 颗芯 + 7 层泡棉建成一个三维复合有限体积域（沿 Y 堆叠），
-#   电芯各向异性导热 k=(12,0.7,11.6)，泡棉 k=0.04，逐面非对称对流冷却：
-#     - 顶部（bat1 外大面, 全局 y=0）：25°C 强制对流冷板  h_top=50 W/m?K, T=298.15K
+#   把 8 颗芯建成一个三维复合有限体积域（沿 Y 堆叠，电芯间无泡棉），
+#   电芯各向异性导热 k=(12,0.7,11.6)，逐面非对称对流冷却：
+#     - 顶部（bat1 外大面, 全局 y=0）：25°C 强制对流冷板  h_top=50 W/m^2K, T=298.15K
 #     - 底部（bat8 外大面, 全局 y=max）：绝热（无换热） h_bottom=0
-#     - 侧面（x0/x1/z0/z1 小面）：强对流              h_side=50 W/m?K, T=298.15K
+#     - 薄侧（x0/x1/z0/z1 小面）：泡棉(k=0.04, 厚1mm) + 空气自然对流 h_side=50 W/m^2K, T=298.15K
+#       薄侧每个面用「泡棉导热 + 空气对流」串联热阻： g = A/(d_foam/k_foam + 1/h_side)
 #
 # 电气: 8S 串联, 总负载 314A 恒流放电（1C, 2h）。
 # 热耦合: Pack 双步循环把 ECM 产热(含 R_contact 发热) 喂给 StackThermal3D。
@@ -34,51 +36,69 @@ out_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file
 
 
 def main():
-    # ────── 工况参数 ──────
+    # ---- 工况参数 ----
     n_cells = 8
     I_load = 314.0               # 总负载 1C [A]（8S 串联，每芯 314A）
     t_total = 7200.0             # 2 小时
     dt = 2.0
     n_steps = int(t_total / dt)  # 3600 步
 
-    # ────── 泡棉参数（相邻大面之间）──────
+    # ---- 薄侧泡棉（贴在 X/Z 侧向小面，与空气连接）----
     k_foam = 0.04                # EVA/PE 泡棉 [W/(m·K)]
     d_foam = 0.001               # 1 mm
-    R_th_foam = d_foam / k_foam  # 0.025 K·m?/W = 250 K·cm?/W
-    A_row = 0.174 * 0.207        # 大面 XZ = 0.03602 m?（背靠背接触面）
-    G_foam = A_row / R_th_foam   # ≈ 1.44 W/K（每界面等效导热）
-    print(f"泡棉: 1mm EVA k={k_foam} → R_th={R_th_foam:.4f} K·m?/W ({R_th_foam*1e4:.0f} K·cm?/W)")
-    print(f"  7 个背靠背大面界面, 每个 A={A_row*1e4:.0f}cm? → G={G_foam:.3f} W/K")
+    h_side_air = 50.0             # 薄侧空气自然对流 [W/(m^2·K)]
+    Rpp_foam = d_foam / k_foam          # 单位面积泡棉热阻 = 0.025 K·m^2/W
+    Rpp_conv = 1.0 / h_side_air         # 单位面积对流热阻   = 0.02  K·m^2/W
+    Lx, Ly, Lz = 0.174, 0.0717, 0.207   # 临时占位，下面会被 spec 覆盖
+    # 薄侧(侧向 X/Z 小面) 总面积
+    A_side_x = 2 * (n_cells * Ly) * Lz
+    A_side_z = 2 * (n_cells * Ly) * Lx
+    A_side = A_side_x + A_side_z
+    g_side = A_side / (Rpp_foam + Rpp_conv)   # 薄侧等效总导热 [W/K]
+    print(f"薄侧泡棉: 1mm EVA k={k_foam}, 单位面积热阻 R''={Rpp_foam:.4f} K·m^2/W")
+    print(f"  空气对流 h={h_side_air} -> R''={Rpp_conv:.4f} K·m^2/W")
+    print(f"  薄侧总面积 A_side={A_side*1e4:.0f} cm^2 -> 串联等效导热 G_side={g_side:.2f} W/K")
 
-    # ────── 8 颗 314Ah 电芯 ──────
+    # ---- 8 颗 314Ah 电芯 ----
     cells = [ep.ECMCell(ep.cell_314ah_spec(soc_init=1.0, T_init=298.15))
              for _ in range(n_cells)]
     spec = cells[0].spec
     Lx, Ly, Lz = spec.Lx, spec.Ly, spec.Lz
     k_cell = spec.k
     rho, cp = spec.rho, spec.cp
+    # 用真实几何重算薄侧面积/导热
+    A_side_x = 2 * (n_cells * Ly) * Lz
+    A_side_z = 2 * (n_cells * Ly) * Lx
+    A_side = A_side_x + A_side_z
+    g_side = A_side / (Rpp_foam + Rpp_conv)
+    A_bigface = Lx * Lz
+    g_top = 50.0 * A_bigface         # 顶部冷板(无泡棉) 等效导热
+    print(f"  真实几何: Lx={Lx} Ly={Ly} Lz={Lz}, 大面={A_bigface*1e4:.0f}cm^2")
+    print(f"  重算薄侧 G_side={g_side:.2f} W/K, 顶部冷板 G_top={g_top:.2f} W/K")
 
-    # ────── 电气: 8S 串联 ──────
+    # ---- 电气: 8S 串联 ----
     nl, _, _ = ep.setup_circuit(8, 1)
 
-    # ────── 三维复合热模型（大面背靠背 1×8 堆叠 + 逐面非对称冷却）──────
+    # ---- 三维复合热模型（大面背靠背 1×8 直接贴合 + 薄侧泡棉 + 逐面非对称冷却）----
     #   bat1 外大面(y=0)     → 25°C 强制对流冷板
     #   bat8 外大面(y=max)   → 绝热
-    #   侧面(x0/x1/z0/z1)    → 强对流
+    #   薄侧(x0/x1/z0/z1)    → 泡棉(k=0.04,1mm) + 空气自然对流 h=50
+    #   注意：电芯之间「没有泡棉」，泡棉只贴在薄侧(侧向小面)
     thermal = StackThermal3D(
         n_cells=n_cells, Lx=Lx, Ly=Ly, Lz=Lz,
         nx=4, ny=5, nz=8,                 # 每芯网格
         cell_k=k_cell, cell_rho=rho, cell_cp=cp,
-        foam_k=k_foam, foam_thickness=d_foam, foam_ny=1,
+        foam_k=k_foam, foam_thickness=d_foam,
         h_top=50.0, T_top=298.15,         # 顶部 25°C 冷板（强制对流）
         h_bottom=0.0, T_bottom=298.15,    # 底部绝热（无换热）
-        h_side=50.0, T_amb=298.15,        # 侧面强对流
+        h_side=50.0, T_amb=298.15,        # 薄侧泡棉 + 空气自然对流
         T_init=298.15,
     )
-    print(f"\n三维热模型: 8 芯沿 Y 堆叠, 网格 {thermal.NX}×{thermal.NY}×{thermal.NZ}"
-          f" = {thermal.N} 节点, 泡棉层 {n_cells-1}")
+    print(f"\n三维热模型: 8 芯沿 Y 直接贴合(无电芯间泡棉), 网格 {thermal.NX}x{thermal.NY}x{thermal.NZ}"
+          f" = {thermal.N} 节点")
+    print(f"  泡棉仅贴薄侧(X/Z 侧向小面)，与空气串联对流")
 
-    # ────── Pack 耦合求解 ──────
+    # ---- Pack 耦合求解 ----
     pack = ep.Pack(cells, nl, thermal=thermal, v_cut_lower=2.0)
     out = pack.solve(dt=dt, control=I_load, control_type="current",
                      n_steps=n_steps, record_every=60)
@@ -89,11 +109,11 @@ def main():
     I_cell = out["Cell current [A]"]
     soc = out["Cell SoC"]
 
-    # ────── 报告 ──────
+    # ---- 报告 ----
     T_end = T_cells[-1, :]
     print("\n" + "=" * 65)
-    print(f" 8S 大面背靠背串联 / 1×8 堆叠 / 全泡棉 / 三维非对称冷却")
-    print(f" 顶部25°C冷板(h=50)  底部绝热  侧面强对流(h=50)  1C=314A / 2h")
+    print(f" 8S 大面背靠背串联 / 1×8 直接贴合(无泡棉) / 薄侧泡棉+空气 / 三维非对称冷却")
+    print(f" 顶部25°C冷板(h=50)  底部绝热  薄侧泡棉+空气(h=50)  1C=314A / 2h")
     print("=" * 65)
     for idx in range(n_cells):
         if idx == 0:
@@ -111,14 +131,15 @@ def main():
           f"最凉(bat{int(np.argmin(T_end))+1}@{T_end.min():.2f}K)")
     print(f"  → 冷板端bat1={T_end[0]:.2f}K, 绝热端bat8={T_end[-1]:.2f}K, "
           f"bat8-bat1={T_end[-1]-T_end[0]:+.3f}K（应为正：底部绝热更热）")
+    print(f"  → 电芯间无泡棉：沿 Y 不再有泡沫瓶颈陡降，bat1↔bat8 仅因冷板/绝热而渐变")
 
-    # ────── 图1: 整包温度 + 端电压 ──────
+    # ---- 图1: 整包温度 + 端电压 ----
     fig1, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, 6))
     colors = plt.cm.tab10(np.linspace(0, 1, n_cells))
     for idx in range(n_cells):
         ax1.plot(time_arr/60, T_cells[:, idx], color=colors[idx], lw=1.2, label=f"bat{idx+1}")
     ax1.set(ylabel="温度 [K]",
-            title=f"8S 大面背靠背 1×8 堆叠温度演变（三维非对称冷却） 整包ΔT={dT_pack:.3f}K")
+            title=f"8S 大面背靠背 1×8 直接贴合温度演变（薄侧泡棉+空气, 三维非对称冷却） 整包ΔT={dT_pack:.3f}K")
     ax1.legend(ncol=4, fontsize=7, loc="upper left")
     ax1.grid(alpha=0.3)
     ax2.plot(time_arr/60, Vt, color="#1f77b4", lw=1.6)
@@ -130,7 +151,7 @@ def main():
     plt.close(fig1)
     print(f"\n  温度曲线: {png1}")
 
-    # ────── 图2: 末态温升 bar ──────
+    # ---- 图2: 末态温升 bar ----
     fig2, ax3 = plt.subplots(figsize=(10, 3.5))
     x_pos = np.arange(n_cells)
     rise = T_end - 298.15
@@ -151,28 +172,34 @@ def main():
     plt.close(fig2)
     print(f"  温升柱图: {png2}")
 
-    # ────── 图3: 堆叠示意图（链 + 冷板/绝热）──────
+    # ---- 图3: 堆叠示意图（大面贴合 + 薄侧泡棉）----
     fig3, ax4 = plt.subplots(figsize=(11, 3))
     x0 = 0.0
     cw = 1.0   # 电芯框宽
-    fw = 0.18  # 泡棉间隙
     for idx in range(n_cells):
-        x = x0 + idx * (cw + fw)
+        x = x0 + idx * cw
         fc = "lightblue" if idx in (0, n_cells-1) else "lightcyan"
-        ax4.add_patch(plt.Rectangle((x, 0.3), cw, 1.4, fc=fc, ec="gray", lw=1.3))
-        ax4.text(x+cw/2, 1.0, f"bat{idx+1}", ha="center", va="center", fontsize=8)
-        if idx < n_cells-1:
-            ax4.add_patch(plt.Rectangle((x+cw, 0.7), fw, 0.6, fc="orange", ec="none", alpha=0.6))
-            ax4.text(x+cw+fw/2, 1.55, "泡棉", ha="center", fontsize=6, color="darkorange")
-    # 冷板（左）
-    ax4.add_patch(plt.Rectangle((x0-0.35, 0.3), 0.3, 1.4, fc="skyblue", ec="blue", lw=1.5))
+        ax4.add_patch(plt.Rectangle((x, 0.45), cw, 1.2, fc=fc, ec="gray", lw=1.3))
+        ax4.text(x+cw/2, 1.05, f"bat{idx+1}", ha="center", va="center", fontsize=8)
+        # 电芯间“直接贴合(无泡棉)”标注
+        if idx < n_cells - 1:
+            ax4.text(x+cw, 1.05, "贴合", ha="center", va="center", fontsize=6, color="gray")
+    # 薄侧泡棉：贴在每颗电芯的上下边缘(侧向小面)，连到空气
+    for idx in range(n_cells):
+        x = x0 + idx * cw
+        ax4.add_patch(plt.Rectangle((x, 0.40), cw, 0.05, fc="orange", ec="none", alpha=0.7))
+        ax4.add_patch(plt.Rectangle((x, 1.65), cw, 0.05, fc="orange", ec="none", alpha=0.7))
+    ax4.text(x0 + n_cells*cw/2, 1.85, "薄侧泡棉↔空气(自然对流 h=50)",
+             ha="center", fontsize=8, color="darkorange")
+    # 冷板（左端 = bat1 外大面）
+    ax4.add_patch(plt.Rectangle((x0-0.35, 0.45), 0.3, 1.2, fc="skyblue", ec="blue", lw=1.5))
     ax4.text(x0-0.2, 2.0, "25°C\n冷板", ha="center", fontsize=8, color="blue")
-    # 绝热（右）
-    ax4.add_patch(plt.Rectangle((x0+n_cells*(cw+fw)-0.15, 0.3), 0.15, 1.4, fc="white", ec="gray", lw=1, ls="--"))
-    ax4.text(x0+n_cells*(cw+fw), 2.0, "绝热", ha="center", fontsize=8, color="gray")
-    ax4.set(xlim=(x0-0.6, x0+n_cells*(cw+fw)+0.6), ylim=(0, 2.4),
+    # 绝热（右端 = bat8 外大面）
+    ax4.add_patch(plt.Rectangle((x0+n_cells*cw-0.15, 0.45), 0.15, 1.2, fc="white", ec="gray", lw=1, ls="--"))
+    ax4.text(x0+n_cells*cw, 2.0, "绝热", ha="center", fontsize=8, color="gray")
+    ax4.set(xlim=(x0-0.6, x0+n_cells*cw+0.6), ylim=(0.2, 2.4),
             xticks=[], yticks=[])
-    ax4.set_title("1×8 大面背靠背串联堆叠：左端25°C冷板 / 右端绝热 / 侧面强对流",
+    ax4.set_title("1×8 大面背靠背直接贴合：电芯间无泡棉；泡棉仅贴薄侧↔空气；左端25°C冷板/右端绝热",
                   fontsize=11)
     ax4.set_aspect("equal")
     fig3.tight_layout()
@@ -181,7 +208,7 @@ def main():
     plt.close(fig3)
     print(f"  堆叠示意: {png3}")
 
-    # ────── 图4: 沿堆叠轴(Y) 三维温度剖面 ──────
+    # ---- 图4: 沿堆叠轴(Y) 三维温度剖面 ----
     fig4, ax5 = plt.subplots(figsize=(11, 4))
     thermal.plot_y_profile(ax=ax5)
     fig4.tight_layout()
@@ -190,7 +217,7 @@ def main():
     plt.close(fig4)
     print(f"  堆叠剖面: {png4}")
 
-    # ────── 图5: X–Y 三维温度场切片 ──────
+    # ---- 图5: X–Y 三维温度场切片 ----
     fig5, ax6 = plt.subplots(figsize=(11, 4))
     thermal.plot_xz_slice(z_frac=0.5, ax=ax6)
     fig5.tight_layout()
@@ -199,7 +226,7 @@ def main():
     plt.close(fig5)
     print(f"  三维切片: {png5}")
 
-    # ────── CSV ──────
+    # ---- CSV ----
     csv_path = os.path.join(out_dir, "ecm_pack_8s_foam_data.csv")
     header = "Time_s,Vt_V," + ",".join([f"T_bat{i+1}_K" for i in range(n_cells)]) \
              + "," + ",".join([f"SOC_bat{i+1}" for i in range(n_cells)])

@@ -12,7 +12,7 @@ TAMB = 298.15
 
 
 def _residual(st, Q):
-    """离散残差 Σ(导热+对流+源)，稳态应≈0（能量平衡）。"""
+    """离散残差 (A·T - C·T)/dt - (src + bc_rhs)，稳态应≈0（能量平衡）。"""
     Q = np.asarray(Q, dtype=float)
     src = np.zeros(st.N)
     for n in range(st.N):
@@ -23,10 +23,10 @@ def _residual(st, Q):
 
 
 def test_energy_balance_single_cell():
-    """单芯全表面冷却：稳态离散残差相对产热应很小（能量平衡）。"""
+    """单芯(薄侧泡棉+空气)冷却：稳态离散残差相对产热应很小（能量平衡）。"""
     Q = 50.0
     st = StackThermal3D(1, Lx, Ly, Lz, 2, 3, 3, K, RHO, CP,
-                        foam_k=0.04, foam_thickness=0.001, foam_ny=1,
+                        foam_k=0.04, foam_thickness=0.001,
                         h_top=20, T_top=TAMB, h_bottom=20, T_bottom=TAMB,
                         h_side=20, T_amb=TAMB, T_init=TAMB)
     for _ in range(4000):
@@ -35,38 +35,41 @@ def test_energy_balance_single_cell():
     assert abs(r.sum()) < 0.02 * Q, f"能量不平衡: 残差={r.sum():.3f}W"
 
 
-def test_foam_insulation_direction():
-    """泡棉导热越差，两芯温差应越大（界面导热方向正确）。"""
+def test_foam_side_insulation_direction():
+    """薄侧泡棉越差(低k)，侧面散热越弱、整芯越热（方向正确）。
+    仅用薄侧散热(顶/底绝热)以隔离泡棉影响，得到清晰的方向差。"""
     Q2 = np.array([60.0, 20.0])
-    # 差泡棉
+    kw = dict(h_top=0, T_top=TAMB, h_bottom=0, T_bottom=TAMB,
+               h_side=50, T_amb=TAMB, T_init=TAMB)
+    # 差泡棉（薄侧为关键热阻）
     s_bad = StackThermal3D(2, Lx, Ly, Lz, 2, 3, 3, K, RHO, CP,
-                           foam_k=0.005, foam_thickness=0.001, foam_ny=1,
-                           h_top=10, T_top=TAMB, h_bottom=10, T_bottom=TAMB,
-                           h_side=10, T_amb=TAMB, T_init=TAMB)
-    for _ in range(4000):
-        s_bad.step(Q2, dt=10.0)
+                           foam_k=0.005, foam_thickness=0.001, **kw)
+    for _ in range(5000):
+        s_bad.step(Q2, dt=20.0)
     # 好泡棉
     s_good = StackThermal3D(2, Lx, Ly, Lz, 2, 3, 3, K, RHO, CP,
-                            foam_k=5.0, foam_thickness=0.001, foam_ny=1,
-                            h_top=10, T_top=TAMB, h_bottom=10, T_bottom=TAMB,
-                            h_side=10, T_amb=TAMB, T_init=TAMB)
-    for _ in range(4000):
-        s_good.step(Q2, dt=10.0)
-    gap_bad = s_bad.T[0] - s_bad.T[1]
-    gap_good = s_good.T[0] - s_good.T[1]
-    assert gap_bad > gap_good, f"泡棉方向错误: 差{gap_bad:.1f} 好{gap_good:.1f}"
-    # 能量平衡（弱Y导热+差泡棉使平衡较慢，留 5% 余量）
+                            foam_k=5.0, foam_thickness=0.001, **kw)
+    for _ in range(5000):
+        s_good.step(Q2, dt=20.0)
+    t_bad = s_bad.T.mean()
+    t_good = s_good.T.mean()
+    assert t_bad > t_good, f"薄侧泡棉方向错误: 差{t_bad:.1f}K 好{t_good:.1f}K"
+    # 能量平衡（仅侧面散热、弱导热使平衡较慢，留 5% 余量）
     assert abs(_residual(s_bad, Q2).sum()) < 0.05 * Q2.sum()
     assert abs(_residual(s_good, Q2).sum()) < 0.05 * Q2.sum()
 
 
 def test_per_cell_temperature_length():
-    """StackThermal3D.T 长度须等于电芯数，供 Pack 接入。"""
+    """StackThermal3D.T 长度须等于电芯数，供 Pack 接入；
+    且按用户修正：电芯之间(沿Y)不应有泡棉块，泡棉只在薄侧。"""
     st = StackThermal3D(8, Lx, Ly, Lz, 2, 3, 3, K, RHO, CP,
-                        foam_k=0.04, foam_thickness=0.001, foam_ny=1,
+                        foam_k=0.04, foam_thickness=0.001,
                         h_top=50, T_top=TAMB, h_bottom=0, T_bottom=TAMB,
                         h_side=50, T_amb=TAMB, T_init=TAMB)
     assert st.T.shape == (8,)
+    # 关键修正：沿 Y 的每个切片都是电芯，不含任何泡棉块
+    assert not any(p.get("foam", False) for p in st._per_j), \
+        "电芯之间不应有泡棉块（泡棉只在薄侧）"
     # 底部绝热、顶部冷板：bat8 应不比 bat1 凉（非对称生效）
     for _ in range(300):
         st.step(np.full(8, 60.0), dt=10.0)
