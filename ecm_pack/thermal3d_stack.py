@@ -533,7 +533,8 @@ class StackThermal3D:
             ):
                 add_face(face, plastic_color, alpha_plastic, "blue", 0.25)
 
-        # ---- adiabatic bottom marker (y = n*Ly, visible slab) ----
+        # ---- bottom boundary marker (y = n*Ly) ----
+        # Air convection -> light-blue translucent slab; adiabatic -> gray hatched slab.
         y_bot = n * Ly
         bot = [
             [0.0, y_bot, 0.0], [Lx, y_bot, 0.0],
@@ -541,24 +542,42 @@ class StackThermal3D:
             [0.0, y_bot, Lz], [Lx, y_bot, Lz],
             [Lx, y_bot + vis_d_adiab, Lz], [0.0, y_bot + vis_d_adiab, Lz],
         ]
-        for face in (
-            [bot[0], bot[1], bot[5], bot[4]],
-            [bot[2], bot[3], bot[7], bot[6]],
-            [bot[0], bot[3], bot[7], bot[4]],
-            [bot[1], bot[2], bot[6], bot[5]],
-            [bot[4], bot[5], bot[6], bot[7]],
-        ):
-            add_face(face, adiabatic_color, alpha_adiabatic, "black", 0.5)
-        # diagonal hatching lines on adiabatic bottom face
-        hatch_lines = []
-        for t in np.linspace(0.05, 0.95, 6):
-            hatch_lines.append([[t * Lx, y_bot + vis_d_adiab, 0.0],
-                                [t * Lx, y_bot + vis_d_adiab, Lz]])
-            hatch_lines.append([[0.0, y_bot + vis_d_adiab, t * Lz],
-                                [Lx, y_bot + vis_d_adiab, t * Lz]])
-        ax.add_collection3d(
-            Line3DCollection(hatch_lines, colors="black", linewidths=0.6,
-                             linestyles="--", alpha=0.6))
+        if self.h_bottom > 0.0:
+            bot_color = "#87ceeb"   # light sky blue = air convection
+            bot_edge = "navy"
+            for face in (
+                [bot[0], bot[1], bot[5], bot[4]],
+                [bot[2], bot[3], bot[7], bot[6]],
+                [bot[0], bot[3], bot[7], bot[4]],
+                [bot[1], bot[2], bot[6], bot[5]],
+                [bot[4], bot[5], bot[6], bot[7]],
+            ):
+                add_face(face, bot_color, 0.40, bot_edge, 0.6)
+            # small convection arrows pointing away from the face
+            for t in np.linspace(0.15, 0.85, 4):
+                ax.plot([t * Lx, t * Lx], [y_bot + vis_d_adiab, y_bot + vis_d_adiab + 0.012],
+                        [t * Lz, t * Lz], color=bot_edge, lw=0.8, alpha=0.8)
+            bot_label = "AIR CONV"
+        else:
+            for face in (
+                [bot[0], bot[1], bot[5], bot[4]],
+                [bot[2], bot[3], bot[7], bot[6]],
+                [bot[0], bot[3], bot[7], bot[4]],
+                [bot[1], bot[2], bot[6], bot[5]],
+                [bot[4], bot[5], bot[6], bot[7]],
+            ):
+                add_face(face, adiabatic_color, alpha_adiabatic, "black", 0.5)
+            # diagonal hatching lines on adiabatic bottom face
+            hatch_lines = []
+            for t in np.linspace(0.05, 0.95, 6):
+                hatch_lines.append([[t * Lx, y_bot + vis_d_adiab, 0.0],
+                                    [t * Lx, y_bot + vis_d_adiab, Lz]])
+                hatch_lines.append([[0.0, y_bot + vis_d_adiab, t * Lz],
+                                    [Lx, y_bot + vis_d_adiab, t * Lz]])
+            ax.add_collection3d(
+                Line3DCollection(hatch_lines, colors="black", linewidths=0.6,
+                                 linestyles="--", alpha=0.6))
+            bot_label = "ADIABATIC"
 
         # ---- 3D leader-line labels (placed in the foreground for the view) ----
         label_kw = dict(color="black", fontsize=9, fontweight="bold",
@@ -580,8 +599,9 @@ class StackThermal3D:
                 "PLASTIC", [Lx + 0.025, -0.030, 0.20],
                 [Lx * 0.5, -vis_d_plastic, Lz * 0.5], plastic_color)
         label_with_line(
-            "ADIABATIC", [0.12, y_bot + 0.038, 0.22],
-            [Lx * 0.5, y_bot + vis_d_adiab, Lz * 0.5], adiabatic_color)
+            bot_label, [0.12, y_bot + 0.038, 0.22],
+            [Lx * 0.5, y_bot + vis_d_adiab, Lz * 0.5],
+            bot_color if self.h_bottom > 0.0 else adiabatic_color)
 
         # ---- axes, limits, view ----
         pad = max(vis_d_foam, vis_d_plastic, 0.015)
@@ -600,13 +620,17 @@ class StackThermal3D:
         cbar.set_ticks(np.linspace(Tmin, Tmax, 5))
 
         # ---- legend ----
+        bot_legend_label = ("Air conv (bottom)" if self.h_bottom > 0.0
+                               else "Adiabatic (bottom)")
+        bot_legend_color = ("#87ceeb" if self.h_bottom > 0.0
+                                else adiabatic_color)
         handles = [
             mpatches.Patch(facecolor=foam_color, edgecolor="darkorange",
                            label="Foam layer"),
             mpatches.Patch(facecolor=plastic_color, edgecolor="blue",
                            label="Plastic sheet (top)"),
-            mpatches.Patch(facecolor=adiabatic_color, edgecolor="black",
-                           label="Adiabatic (bottom)"),
+            mpatches.Patch(facecolor=bot_legend_color, edgecolor="black",
+                           label=bot_legend_label),
             mpatches.Patch(facecolor="white", edgecolor="k",
                            label="Bare air side"),
         ]
@@ -620,7 +644,8 @@ class StackThermal3D:
             f"Foam sides: {foam_str}\n"
             f"Bare-air sides: {air_str}\n"
             f"Top (y=0): plastic({self.k_top:.2f}W/mK,d={self.d_top*1e3:.1f}mm)+air\n"
-            f"Bottom (y=max): adiabatic\n"
+            f"Bottom (y=max): "
+            f"{'air conv h='+format(self.h_bottom,'.1f') if self.h_bottom>0 else 'adiabatic'}\n"
             f"h_conv={self.h_side:.1f} W/m2K  T_amb={self.T_amb:.2f}K"
         )
         ax.text2D(0.97, 0.05, bc_text, transform=ax.transAxes,
@@ -630,9 +655,11 @@ class StackThermal3D:
                             edgecolor="gray", alpha=0.92))
 
         if title is None:
+            bot_word = ("air bottom" if self.h_bottom > 0.0
+                         else "adiabatic bottom")
             title = (
                 f"8S Pack 3D | stack along Y | foam={sorted(self.foam_faces)} | "
-                f"plastic top | adiabatic bottom | T_amb={self.T_amb:.2f}K | "
+                f"plastic top | {bot_word} | T_amb={self.T_amb:.2f}K | "
                 f"dT_pack={Tmax - Tmin:.3f}K"
             )
         ax.set_title(title, fontsize=11)

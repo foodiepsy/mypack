@@ -6,14 +6,14 @@
 #   薄侧: +X面、+Z面 = 泡棉(k=0.04,1mm) + 25°C空气强制对流；
 #         -X面、-Z面 = 直接25°C空气强制对流（无泡棉隔层）。
 #   顶部: 塑料片(k=0.2,d=0.2mm) + 25°C强制对流。
-#   底部: 绝热（无换热）。
+#   底部(大面尾部): 25°C空气强制对流(非绝热)。
 #   无冷板。
 #
 # 三维热模型 StackThermal3D(thermal3d_stack.py):
 #   foam_faces=["x0","z0"]  — +X/+Z贴泡棉, -X/-Z直接空气
 #   k_top=0.2, d_top=2e-4   — 顶部塑料薄层串联对流
 #   h_top=h_side=50         — 25°C强制对流, T_amb=298.15K
-#   h_bottom=0              — 底部绝热
+#   h_bottom=50              — 底部大面=空气强制对流(非绝热)
 #
 # 电气: 8S 串联, 总负载 314A 恒流放电（1C, 2h）。
 import sys, os
@@ -67,11 +67,12 @@ def main():
     G_bare_side = A_bare * h_env             # 直接空气面无泡棉
     Rpp_plastic = d_plastic / k_plastic      # 塑料片单位面积热阻 ~ 0.0010
     G_top = (Lx * Lz) / (Rpp_plastic + Rpp_conv)
+    G_bottom = Lx * Lz * h_env             # 底部大面=空气对流(非绝热)
 
     print(f"薄侧(+X,+Z): 1mm EVA k={k_foam} 面积={A_foam*1e4:.0f}cm^2 -> G={G_foam_side:.2f} W/K")
     print(f"薄侧(-X,-Z): 直接空气 h={h_env} 面积={A_bare*1e4:.0f}cm^2 -> G={G_bare_side:.2f} W/K")
     print(f"顶部塑料: k={k_plastic} d={d_plastic*1e3:.1f}mm -> G_top={G_top:.2f} W/K")
-    print(f"底部: 绝热 G=0")
+    print(f"底部: 空气对流 h={h_env}  (非绝热)  G={G_bottom:.2f}")
 
     # ---- 8 颗 314Ah 电芯 ----
     cells = [ep.ECMCell(ep.cell_314ah_spec(soc_init=1.0, T_init=298.15))
@@ -99,7 +100,7 @@ def main():
         foam_faces=["x0", "z0"],         # +X/+Z贴泡棉, -X/-Z直接空气
         k_top=k_plastic, d_top=d_plastic,  # 顶部塑料薄层
         h_top=h_env, T_top=T_amb,         # 顶部 25°C强制对流（无冷板）
-        h_bottom=0.0, T_bottom=T_amb,    # 底部绝热
+        h_bottom=h_env, T_bottom=T_amb,    # 底部大面=25°C空气强制对流(非绝热)
         h_side=h_env, T_amb=T_amb,        # 薄侧 25°C强制对流
         T_init=T_amb,
     )
@@ -123,13 +124,13 @@ def main():
     thermal.T = T_end.copy()
     print("\n" + "=" * 65)
     print(f" 8S 大面背靠背 1×8 贴合(无泡棉) / 薄侧不对称(+X,+Z泡棉/-X,-Z直接空气)")
-    print(f" 25°C强制对流(h=50) 顶部塑料片 底部绝热 1C=314A / 2h")
+    print(f" 25°C强制对流(h=50) 顶部塑料片 底部空气对流 1C=314A / 2h")
     print("=" * 65)
     for idx in range(n_cells):
         if idx == 0:
             ylab = "0(顶)"
         elif idx == n_cells - 1:
-            ylab = "max(底绝热)"
+            ylab = "max(底空气)"
         else:
             ylab = str(idx)
         print(f"  bat{idx+1} (y={ylab})  T_final={T_end[idx]:.2f}K  "
@@ -139,7 +140,7 @@ def main():
     print(f"  整包ΔT_max: {dT_pack:.4f}K  "
           f"最热(bat{int(np.argmax(T_end))+1}@{T_end.max():.2f}K)  "
           f"最凉(bat{int(np.argmin(T_end))+1}@{T_end.min():.2f}K)")
-    print(f"  bat8-bat1={T_end[-1]-T_end[0]:+.3f}K（应为正：底部绝热）")
+    print(f"  bat8-bat1={T_end[-1]-T_end[0]:+.3f}K（顶部塑料片热阻高->bat1偏凉）")
 
     # ---- 图1: 整包温度 + 端电压 ----
     fig1, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, 6))
@@ -147,7 +148,7 @@ def main():
     for idx in range(n_cells):
         ax1.plot(time_arr/60, T_cells[:, idx], color=colors[idx], lw=1.2, label=f"bat{idx+1}")
     ax1.set(ylabel="温度 [K]",
-            title=f"8S 大面背靠背贴 温度演变（薄侧不对称+顶塑料+底部绝热） dT={dT_pack:.3f}K")
+            title=f"8S 大面背靠背贴 温度演变（薄侧不对称+顶塑料+底空气对流） dT={dT_pack:.3f}K")
     ax1.legend(ncol=4, fontsize=7, loc="upper left")
     ax1.grid(alpha=0.3)
     ax2.plot(time_arr/60, Vt, color="#1f77b4", lw=1.6)
@@ -201,11 +202,11 @@ def main():
     # 顶部塑料片（左端外 = bat1 顶面）
     ax4.add_patch(plt.Rectangle((x0-0.30, 0.5), 0.2, 1.0, fc="lightgreen", ec="green", lw=1.2))
     ax4.text(x0-0.20, 1.85, "顶塑料片\nk=0.2\n+空气", ha="center", fontsize=7, color="green")
-    # 底部绝热（右端外 = bat8 底面）
-    ax4.add_patch(plt.Rectangle((x0+n_cells*cw-0.10, 0.5), 0.1, 1.0, fc="white", ec="gray", lw=1, ls="--"))
-    ax4.text(x0+n_cells*cw, 1.85, "绝热", ha="center", fontsize=8, color="gray")
+    # 底部空气对流（右端外 = bat8 底面，非绝热）
+    ax4.add_patch(plt.Rectangle((x0+n_cells*cw-0.10, 0.5), 0.1, 1.0, fc="lightblue", ec="navy", lw=1.2))
+    ax4.text(x0+n_cells*cw, 1.85, "底部空气\n对流", ha="center", fontsize=8, color="navy")
     ax4.set(xlim=(x0-0.5, x0+n_cells*cw+0.5), ylim=(0.1, 2.1), xticks=[], yticks=[])
-    ax4.set_title("1×8 大面背靠背直接贴合(无泡棉)+薄侧不对称+顶塑料片+底绝热", fontsize=11)
+    ax4.set_title("1×8 大面背靠背直接贴合(无泡棉)+薄侧不对称+顶塑料片+底空气对流", fontsize=11)
     fig3.tight_layout()
     png3 = os.path.join(out_dir, "ecm_pack_8s_foam_network.png")
     fig3.savefig(png3, dpi=130)
@@ -230,7 +231,7 @@ def main():
     plt.close(fig5)
     print(f"  三维切片: {png5}")
 
-    # ---- 图6: 真 3D 包体渲染（8 个体块 + 泡棉/空气 + 顶塑料 + 底绝热）----
+    # ---- 图6: 真 3D 包体渲染（8 个体块 + 泡棉/空气 + 顶塑料 + 底空气对流）----
     png6 = os.path.join(out_dir, "ecm_pack_8s_3dpack.png")
     fig6, _ = thermal.plot_3d_pack(save_path=png6, dpi=130)
     plt.close(fig6)
