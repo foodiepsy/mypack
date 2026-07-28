@@ -118,6 +118,9 @@ def main():
 
     # ---- 报告 ----
     T_end = T_cells[-1, :]
+    # align the 3D thermal object's bulk temperatures with the reported final
+    # snapshot (Pack may have continued past the last record before terminating)
+    thermal.T = T_end.copy()
     print("\n" + "=" * 65)
     print(f" 8S 大面背靠背 1×8 贴合(无泡棉) / 薄侧不对称(+X,+Z泡棉/-X,-Z直接空气)")
     print(f" 25°C强制对流(h=50) 顶部塑料片 底部绝热 1C=314A / 2h")
@@ -226,6 +229,12 @@ def main():
     fig5.savefig(png5, dpi=130)
     plt.close(fig5)
     print(f"  三维切片: {png5}")
+
+    # ---- 图6: 真 3D 包体渲染（8 个体块 + 泡棉/空气 + 顶塑料 + 底绝热）----
+    png6 = os.path.join(out_dir, "ecm_pack_8s_3dpack.png")
+    fig6, _ = thermal.plot_3d_pack(save_path=png6, dpi=130)
+    plt.close(fig6)
+    print(f"  三维包体: {png6}")
 
     # ---- CSV ----
     csv_path = os.path.join(out_dir, "ecm_pack_8s_foam_data.csv")

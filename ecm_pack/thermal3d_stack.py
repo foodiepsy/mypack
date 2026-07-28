@@ -364,3 +364,280 @@ class StackThermal3D:
         if save_path:
             fig.savefig(save_path, dpi=dpi)
         return fig
+
+    def plot_3d_pack(self, ax=None, figsize=(14, 7.5), cmap="jet",
+                     foam_color="#ff8c00", plastic_color="#00bfff",
+                     adiabatic_color="#a9a9a9",
+                     alpha_foam=0.55, alpha_plastic=0.40,
+                     alpha_adiabatic=0.55,
+                     title=None, save_path=None, dpi=130):
+        """Draw a true 3D rendering of the whole 1xN stack.
+
+        Shows each cell as a solid block coloured by bulk temperature, foam pads
+        on the faces listed in ``foam_faces``, a plastic sheet on the top face
+        (y=0), and an adiabatic marker on the bottom face (y=n*Ly).
+        All labels are ASCII-only to avoid encoding issues.
+        """
+        from mpl_toolkits.mplot3d.art3d import Poly3DCollection, Line3DCollection
+        import matplotlib.pyplot as plt
+        import matplotlib.patches as mpatches
+
+        if ax is None:
+            fig = plt.figure(figsize=figsize)
+            ax = fig.add_subplot(111, projection="3d")
+        else:
+            fig = ax.figure
+
+        Lx, Ly, Lz = self.Lx, self.Ly, self.Lz
+        n = self.n_cells
+
+        # temperature -> colour mapping (use a copy to avoid surprise updates)
+        T = np.asarray(self.T, dtype=float).copy()
+        Tmin, Tmax = float(T.min()), float(T.max())
+        norm = plt.Normalize(Tmin, Tmax)
+        sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
+        sm.set_array([])
+
+        foam_x0 = "x0" in self.foam_faces
+        foam_x1 = "x1" in self.foam_faces
+        foam_z0 = "z0" in self.foam_faces
+        foam_z1 = "z1" in self.foam_faces
+
+        # exaggerate thin layers so they are visible in the overview
+        vis_d_foam = max(self.foam_thickness, 0.004)
+        vis_d_plastic = max(self.d_top, 0.003) if self.k_top > 0 else 0.0
+        vis_d_adiab = 0.005
+
+        def add_face(verts, color, alpha=0.95, edgecolor="k", lw=0.3):
+            ax.add_collection3d(
+                Poly3DCollection([verts], facecolors=color,
+                                 edgecolors=edgecolor,
+                                 linewidths=lw, alpha=alpha))
+
+        # ---- cell blocks ----
+        for c in range(n):
+            y0 = c * Ly
+            y1 = y0 + Ly
+            x0, x1 = 0.0, Lx
+            z0, z1 = 0.0, Lz
+            color = sm.to_rgba(T[c])
+
+            v = [
+                [x0, y0, z0], [x1, y0, z0], [x1, y1, z0], [x0, y1, z0],
+                [x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1],
+            ]
+            faces = [
+                [v[0], v[1], v[2], v[3]],  # z = z0
+                [v[4], v[5], v[6], v[7]],  # z = z1
+                [v[0], v[1], v[5], v[4]],  # y = y0  (top)
+                [v[2], v[3], v[7], v[6]],  # y = y1  (bottom)
+                [v[0], v[3], v[7], v[4]],  # x = x0
+                [v[1], v[2], v[6], v[5]],  # x = x1
+            ]
+            for f in faces:
+                add_face(f, color)
+            # cell label on top face (y=0), black text for readability
+            ax.text(Lx * 0.5, y0 + 0.002, Lz * 0.5,
+                    f"bat{c + 1}", color="black", fontsize=8,
+                    ha="center", va="center", fontweight="bold")
+
+        # ---- foam layers on requested thin sides ----
+        for c in range(n):
+            y0 = c * Ly
+            y1 = y0 + Ly
+
+            if foam_x0:
+                ff = [
+                    [-vis_d_foam, y0, 0.0], [0.0, y0, 0.0],
+                    [0.0, y1, 0.0], [-vis_d_foam, y1, 0.0],
+                    [-vis_d_foam, y0, Lz], [0.0, y0, Lz],
+                    [0.0, y1, Lz], [-vis_d_foam, y1, Lz],
+                ]
+                for face in (
+                    [ff[0], ff[3], ff[7], ff[4]],
+                    [ff[1], ff[2], ff[6], ff[5]],
+                    [ff[0], ff[1], ff[2], ff[3]],
+                    [ff[4], ff[5], ff[6], ff[7]],
+                    [ff[0], ff[1], ff[5], ff[4]],
+                    [ff[3], ff[2], ff[6], ff[7]],
+                ):
+                    add_face(face, foam_color, alpha_foam,
+                             "darkorange", 0.8)
+            if foam_x1:
+                ff = [
+                    [Lx, y0, 0.0], [Lx + vis_d_foam, y0, 0.0],
+                    [Lx + vis_d_foam, y1, 0.0], [Lx, y1, 0.0],
+                    [Lx, y0, Lz], [Lx + vis_d_foam, y0, Lz],
+                    [Lx + vis_d_foam, y1, Lz], [Lx, y1, Lz],
+                ]
+                for face in (
+                    [ff[0], ff[1], ff[5], ff[4]],
+                    [ff[2], ff[3], ff[7], ff[6]],
+                    [ff[0], ff[1], ff[2], ff[3]],
+                    [ff[4], ff[5], ff[6], ff[7]],
+                    [ff[1], ff[2], ff[6], ff[5]],
+                    [ff[0], ff[3], ff[7], ff[4]],
+                ):
+                    add_face(face, foam_color, alpha_foam,
+                             "darkorange", 0.8)
+            if foam_z0:
+                ff = [
+                    [0.0, y0, -vis_d_foam], [Lx, y0, -vis_d_foam],
+                    [Lx, y1, -vis_d_foam], [0.0, y1, -vis_d_foam],
+                    [0.0, y0, 0.0], [Lx, y0, 0.0],
+                    [Lx, y1, 0.0], [0.0, y1, 0.0],
+                ]
+                for face in (
+                    [ff[0], ff[1], ff[2], ff[3]],
+                    [ff[4], ff[5], ff[6], ff[7]],
+                    [ff[0], ff[1], ff[5], ff[4]],
+                    [ff[2], ff[3], ff[7], ff[6]],
+                    [ff[1], ff[2], ff[6], ff[5]],
+                    [ff[0], ff[3], ff[7], ff[4]],
+                ):
+                    add_face(face, foam_color, alpha_foam,
+                             "darkorange", 0.8)
+            if foam_z1:
+                ff = [
+                    [0.0, y0, Lz], [Lx, y0, Lz],
+                    [Lx, y1, Lz], [0.0, y1, Lz],
+                    [0.0, y0, Lz + vis_d_foam], [Lx, y0, Lz + vis_d_foam],
+                    [Lx, y1, Lz + vis_d_foam], [0.0, y1, Lz + vis_d_foam],
+                ]
+                for face in (
+                    [ff[4], ff[5], ff[6], ff[7]],
+                    [ff[0], ff[1], ff[2], ff[3]],
+                    [ff[1], ff[2], ff[6], ff[5]],
+                    [ff[0], ff[3], ff[7], ff[4]],
+                    [ff[0], ff[1], ff[5], ff[4]],
+                    [ff[3], ff[2], ff[6], ff[7]],
+                ):
+                    add_face(face, foam_color, alpha_foam,
+                             "darkorange", 0.8)
+
+        # ---- top plastic sheet (y = 0, covers all cells) ----
+        if self.k_top > 0.0 and self.d_top > 0.0:
+            pp = [
+                [0.0, -vis_d_plastic, 0.0], [Lx, -vis_d_plastic, 0.0],
+                [Lx, 0.0, 0.0], [0.0, 0.0, 0.0],
+                [0.0, -vis_d_plastic, Lz], [Lx, -vis_d_plastic, Lz],
+                [Lx, 0.0, Lz], [0.0, 0.0, Lz],
+            ]
+            for face in (
+                [pp[0], pp[1], pp[2], pp[3]],
+                [pp[4], pp[5], pp[6], pp[7]],
+                [pp[0], pp[1], pp[5], pp[4]],
+                [pp[2], pp[3], pp[7], pp[6]],
+                [pp[0], pp[3], pp[7], pp[4]],
+                [pp[1], pp[2], pp[6], pp[5]],
+            ):
+                add_face(face, plastic_color, alpha_plastic, "blue", 0.25)
+
+        # ---- adiabatic bottom marker (y = n*Ly, visible slab) ----
+        y_bot = n * Ly
+        bot = [
+            [0.0, y_bot, 0.0], [Lx, y_bot, 0.0],
+            [Lx, y_bot + vis_d_adiab, 0.0], [0.0, y_bot + vis_d_adiab, 0.0],
+            [0.0, y_bot, Lz], [Lx, y_bot, Lz],
+            [Lx, y_bot + vis_d_adiab, Lz], [0.0, y_bot + vis_d_adiab, Lz],
+        ]
+        for face in (
+            [bot[0], bot[1], bot[5], bot[4]],
+            [bot[2], bot[3], bot[7], bot[6]],
+            [bot[0], bot[3], bot[7], bot[4]],
+            [bot[1], bot[2], bot[6], bot[5]],
+            [bot[4], bot[5], bot[6], bot[7]],
+        ):
+            add_face(face, adiabatic_color, alpha_adiabatic, "black", 0.5)
+        # diagonal hatching lines on adiabatic bottom face
+        hatch_lines = []
+        for t in np.linspace(0.05, 0.95, 6):
+            hatch_lines.append([[t * Lx, y_bot + vis_d_adiab, 0.0],
+                                [t * Lx, y_bot + vis_d_adiab, Lz]])
+            hatch_lines.append([[0.0, y_bot + vis_d_adiab, t * Lz],
+                                [Lx, y_bot + vis_d_adiab, t * Lz]])
+        ax.add_collection3d(
+            Line3DCollection(hatch_lines, colors="black", linewidths=0.6,
+                             linestyles="--", alpha=0.6))
+
+        # ---- 3D leader-line labels (placed in the foreground for the view) ----
+        label_kw = dict(color="black", fontsize=9, fontweight="bold",
+                        ha="center", va="center")
+
+        def label_with_line(text, pos, anchor, color="black"):
+            ax.text(*pos, text, **label_kw)
+            ax.plot([anchor[0], pos[0]], [anchor[1], pos[1]],
+                    [anchor[2], pos[2]], color=color, lw=1.2, alpha=0.8)
+
+        # Keep only the labels that sit in the foreground for the chosen view;
+        # the 2D text box already lists every boundary condition explicitly.
+        if foam_x0:
+            label_with_line(
+                "FOAM", [-0.028, 0.10, 0.22],
+                [-vis_d_foam, 0.10, Lz * 0.5], foam_color)
+        if self.k_top > 0.0 and self.d_top > 0.0:
+            label_with_line(
+                "PLASTIC", [Lx + 0.025, -0.030, 0.20],
+                [Lx * 0.5, -vis_d_plastic, Lz * 0.5], plastic_color)
+        label_with_line(
+            "ADIABATIC", [0.12, y_bot + 0.038, 0.22],
+            [Lx * 0.5, y_bot + vis_d_adiab, Lz * 0.5], adiabatic_color)
+
+        # ---- axes, limits, view ----
+        pad = max(vis_d_foam, vis_d_plastic, 0.015)
+        ax.set_xlim(-pad - 0.005, Lx + pad + 0.005)
+        ax.set_ylim(-pad - 0.005, y_bot + vis_d_adiab + pad + 0.005)
+        ax.set_zlim(-pad - 0.005, Lz + pad + 0.005)
+        ax.set_xlabel("X [m]")
+        ax.set_ylabel("Y (stack) [m]")
+        ax.set_zlabel("Z [m]")
+        ax.set_box_aspect([Lx, y_bot, Lz])
+        ax.view_init(elev=22, azim=-60)
+
+        # ---- colour bar ----
+        cbar = fig.colorbar(sm, ax=ax, shrink=0.55, aspect=18, pad=0.06)
+        cbar.set_label("Cell Temperature [K]")
+        cbar.set_ticks(np.linspace(Tmin, Tmax, 5))
+
+        # ---- legend ----
+        handles = [
+            mpatches.Patch(facecolor=foam_color, edgecolor="darkorange",
+                           label="Foam layer"),
+            mpatches.Patch(facecolor=plastic_color, edgecolor="blue",
+                           label="Plastic sheet (top)"),
+            mpatches.Patch(facecolor=adiabatic_color, edgecolor="black",
+                           label="Adiabatic (bottom)"),
+            mpatches.Patch(facecolor="white", edgecolor="k",
+                           label="Bare air side"),
+        ]
+        ax.legend(handles=handles, loc="upper left", fontsize=8)
+
+        # ---- 2D boundary-condition summary (always readable) ----
+        foam_str = ",".join(sorted(self.foam_faces)) if self.foam_faces else "none"
+        air_faces = sorted({"x0", "x1", "z0", "z1"} - set(self.foam_faces))
+        air_str = ",".join(air_faces) if air_faces else "none"
+        bc_text = (
+            f"Foam sides: {foam_str}\n"
+            f"Bare-air sides: {air_str}\n"
+            f"Top (y=0): plastic({self.k_top:.2f}W/mK,d={self.d_top*1e3:.1f}mm)+air\n"
+            f"Bottom (y=max): adiabatic\n"
+            f"h_conv={self.h_side:.1f} W/m2K  T_amb={self.T_amb:.2f}K"
+        )
+        ax.text2D(0.97, 0.05, bc_text, transform=ax.transAxes,
+                  fontsize=7.5, verticalalignment="bottom",
+                  horizontalalignment="right",
+                  bbox=dict(boxstyle="round,pad=0.35", facecolor="white",
+                            edgecolor="gray", alpha=0.92))
+
+        if title is None:
+            title = (
+                f"8S Pack 3D | stack along Y | foam={sorted(self.foam_faces)} | "
+                f"plastic top | adiabatic bottom | T_amb={self.T_amb:.2f}K | "
+                f"dT_pack={Tmax - Tmin:.3f}K"
+            )
+        ax.set_title(title, fontsize=11)
+
+        fig.tight_layout()
+        if save_path:
+            fig.savefig(save_path, dpi=dpi)
+        return fig, ax
