@@ -15,7 +15,7 @@
 #   h_top=h_side=50         — 25°C强制对流, T_amb=298.15K
 #   h_bottom=50              — 底部大面=空气强制对流(非绝热)
 #
-# 电气: 8S 串联, 总负载 314A 恒流放电（1C, 2h）。
+# 电气: 8S 串联, 总负载 157A 恒流放电（0.5C, 2h）。
 import sys, os
 import numpy as np
 import matplotlib
@@ -39,7 +39,7 @@ out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "result")
 def main():
     # ---- 工况参数 ----
     n_cells = 8
-    I_load = 314.0
+    I_load = 157.0
     t_total = 7200.0
     dt = 2.0
     n_steps = int(t_total / dt)
@@ -124,7 +124,7 @@ def main():
     thermal.T = T_end.copy()
     print("\n" + "=" * 65)
     print(f" 8S 大面背靠背 1×8 贴合(无泡棉) / 薄侧不对称(+X,+Z泡棉/-X,-Z直接空气)")
-    print(f" 25°C强制对流(h=50) 顶部塑料片 底部空气对流 1C=314A / 2h")
+    print(f" 25°C强制对流(h=50) 顶部塑料片 底部空气对流 0.5C=157A / 2h")
     print("=" * 65)
     for idx in range(n_cells):
         if idx == 0:
@@ -140,7 +140,7 @@ def main():
     print(f"  整包ΔT_max: {dT_pack:.4f}K  "
           f"最热(bat{int(np.argmax(T_end))+1}@{T_end.max():.2f}K)  "
           f"最凉(bat{int(np.argmin(T_end))+1}@{T_end.min():.2f}K)")
-    print(f"  bat8-bat1={T_end[-1]-T_end[0]:+.3f}K（顶部塑料片热阻高->bat1偏凉）")
+    print(f"  bat8-bat1={T_end[-1]-T_end[0]:+.3f}K（底部空气对流->bat8最凉，顶部塑料隔热->bat1略高，中间芯最热）")
 
     # ---- 图1: 整包温度 + 端电压 ----
     fig1, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, 6))

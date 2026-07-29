@@ -45,17 +45,22 @@ K_DEFAULT = (12.0, 0.7, 11.6)  # (kx=宽度, ky=厚度, kz=高度) W/(m·K)
 
 
 def R0_314ah(Tdeg, I, soc):
-    """314Ah 大电芯欧姆内阻：0.4 mΩ，随温度/SoC 变化。"""
+    """314Ah 大电芯欧姆内阻：0.4 mΩ，随温度/SoC 变化。
+
+    温度依赖：电池内阻随温升而**下降**（离子电导率↑），故 Arrhenius
+    指数取负号 —— exp(-Ea*(1/T_ref - 1/T))。当前为初始参数化阶段，
+    后续将以 R0-SOC-T 查表形式整体替换。
+    """
     base = R0_DEFAULT
     soc_term = 1.0 + 0.4 * (1.0 - soc)
-    arrhenius = np.exp(2500.0 * (1.0 / 298.15 - 1.0 / (Tdeg + 273.15)))
+    arrhenius = np.exp(-2500.0 * (1.0 / 298.15 - 1.0 / (Tdeg + 273.15)))
     return base * soc_term * arrhenius + 1e-7 * abs(I)
 
 
 def R1_314ah(Tdeg, I, soc):
-    """极化电阻 R1：0.4 mΩ。"""
+    """极化电阻 R1：0.4 mΩ。温度符号同 R0（随温升下降）。"""
     return R1_DEFAULT * (1.0 + 0.3 * (1.0 - soc)) * np.exp(
-        2000.0 * (1.0 / 298.15 - 1.0 / (Tdeg + 273.15))
+        -2000.0 * (1.0 / 298.15 - 1.0 / (Tdeg + 273.15))
     ) + 1e-7 * abs(I)
 
 
