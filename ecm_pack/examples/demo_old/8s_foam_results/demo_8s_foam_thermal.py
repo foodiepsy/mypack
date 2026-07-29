@@ -27,7 +27,7 @@ if os.path.exists(_CJK):
     plt.rcParams["font.family"] = fm.FontProperties(fname=_CJK).get_name()
 plt.rcParams["axes.unicode_minus"] = False
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
 import ecm_pack as ep
 from ecm_pack.thermal3d import CellThermalModel
 
@@ -144,7 +144,7 @@ def main():
     ax2.set(xlabel="时间 [min]", ylabel="端电压 [V]", title="整包端电压")
     ax2.grid(alpha=0.3)
     fig1.tight_layout()
-    out_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    out_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
     png1 = os.path.join(out_dir, "ecm_pack_8s_foam_temp.png")
     fig1.savefig(png1, dpi=130)
     plt.close(fig1)

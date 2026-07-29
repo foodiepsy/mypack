@@ -20,7 +20,7 @@ if os.path.exists(_CJK):
     plt.rcParams["font.family"] = fm.FontProperties(fname=_CJK).get_name()
 plt.rcParams["axes.unicode_minus"] = False
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
 import ecm_pack as ep
 
 
@@ -145,7 +145,7 @@ def main():
 
     fig.suptitle("ecm_pack — 拓扑热切换: 8S 工作 10min 后另一组 8S 并入并联", fontsize=12)
     fig.tight_layout(rect=[0, 0, 1, 0.97])
-    fig.savefig("/workspace/ecm_pack_topology_demo.png", dpi=130)
+    fig.savefig(os.path.join(os.path.dirname(os.path.abspath(__file__)), "result", "ecm_pack_topology_demo.png"), dpi=130)
     print("\n图表已保存 -> /workspace/ecm_pack_topology_demo.png")
 
 

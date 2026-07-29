@@ -20,7 +20,7 @@ if os.path.exists(_CJK):
     plt.rcParams["font.family"] = fm.FontProperties(fname=_CJK).get_name()
 plt.rcParams["axes.unicode_minus"] = False
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
 import ecm_pack as ep
 
 
@@ -128,7 +128,7 @@ def main():
 
     fig.suptitle("ecm_pack — 故障容错重构: 缺陷芯端电压到阈值即自动旁路, 整包继续工作", fontsize=12)
     fig.tight_layout(rect=[0, 0, 1, 0.97])
-    fig.savefig("/workspace/ecm_pack_fault_tolerant_demo.png", dpi=130)
+    fig.savefig(os.path.join(os.path.dirname(os.path.abspath(__file__)), "result", "ecm_pack_fault_tolerant_demo.png"), dpi=130)
     print("\n图表已保存 -> /workspace/ecm_pack_fault_tolerant_demo.png")
 
 

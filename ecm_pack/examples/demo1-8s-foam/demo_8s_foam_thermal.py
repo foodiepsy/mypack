@@ -29,11 +29,11 @@ if os.path.exists(_CJK):
     plt.rcParams["font.family"] = fm.FontProperties(fname=_CJK).get_name()
 plt.rcParams["axes.unicode_minus"] = False
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
 import ecm_pack as ep
 from ecm_pack.thermal3d_stack import StackThermal3D
 
-out_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "result")
 
 
 def main():

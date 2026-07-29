@@ -28,7 +28,7 @@ if os.path.exists(_CJK):
     plt.rcParams["font.family"] = fm.FontProperties(fname=_CJK).get_name()
 plt.rcParams["axes.unicode_minus"] = False
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
 import ecm_pack as ep
 
 
@@ -216,8 +216,7 @@ def main():
     ax[1, 1].grid(alpha=0.3)
 
     fig.tight_layout(rect=[0, 0, 1, 0.95])
-    out_png = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "ecm_pack_8s2p_200a.png")
-    out_png = os.path.abspath(out_png)
+    out_png = os.path.join(os.path.dirname(os.path.abspath(__file__)), "result", "ecm_pack_8s2p_200a.png")
     fig.savefig(out_png, dpi=130)
     print(f" 图已保存: {out_png}")
 

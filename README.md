@@ -18,11 +18,13 @@
 ```bash
 git clone https://github.com/foodiepsy/mypack.git
 cd mypack
-python3.11 ecm_pack/examples/demo.py                  # 四要素演示
-python3.11 ecm_pack/examples/topology_demo.py         # 拓扑热切换：8S 工作 10min 后另一组 8S 并入并联
-python3.11 ecm_pack/examples/fault_tolerant_demo.py   # 故障容错：缺陷芯到阈值自动旁路
-python3.11 ecm_pack/examples/demo_314ah_3d.py         # 314Ah 大电芯 1D/2D/3D 热模型对比
-python3.11 ecm_pack/examples/demo_8s2p_200a.py        # 8S2P / 总负载 200A 环流工况分析
+# 6 个 demo，每个独立文件夹，产物在各自的 result/ 子目录
+python3.11 ecm_pack/examples/demo1-8s-foam/demo_8s_foam_thermal.py    # 8S 大面背靠背 + 薄侧泡棉 + 三维热模型
+python3.11 ecm_pack/examples/demo2-8s2p/demo_8s2p_200a.py             # 8S2P / 200A 环流工况分析
+python3.11 ecm_pack/examples/demo3-314ah-3d/demo_314ah_3d.py          # 314Ah 大电芯 1D/2D/3D 热模型对比
+python3.11 ecm_pack/examples/demo4-basic/demo.py                       # ECM + 拓扑 + 热模型 + 导热（四要素）
+python3.11 ecm_pack/examples/demo5-fault-tolerant/fault_tolerant_demo.py  # 故障容错：缺陷芯到阈值自动旁路
+python3.11 ecm_pack/examples/demo6-topology/topology_demo.py           # 拓扑热切换：运行中并入另一组 8S
 ```
 
 只要 `ecm_pack/` 在 `PYTHONPATH` 即可 `import ecm_pack as ep`。
@@ -38,8 +40,8 @@ python3.11 -m pytest tests/ -v    # 51 项测试全部通过
 | 路径 | 说明 |
 |---|---|
 | `ecm_pack/` | 仿真库本体（见其 [`README.md`](./ecm_pack/README.md) 获取完整 API 与参数说明） |
-| `ecm_pack/examples/` | 五个演示脚本与生成的对比图 |
-| `recognize pack 8k/` | 8S2P / 200A 环流工况的完整结果（图、CSV 数据、脚本、README） |
+| `ecm_pack/examples/` | 六个演示脚本，按 `demo1-8s-foam/` ~ `demo6-topology/` 分文件夹，产物在各自的 `result/` |
+| `ecm_pack/examples/demo_old/` | 旧版 demo1（8s 泡棉）和 demo2（8s2p）的历史脚本与产物（归档，不再维护） |
 | `PyBaMM_ECM_实现分析.md` | PyBaMM ECM 源码分析（工业级 ECM 参数清单） |
 | `ecm_pack_实现报告.md` | 本库实现报告 |
 | `拓扑热切换_实现说明.md` | 拓扑热切换（可重构电池包）原理、验证与踩坑记录 |
