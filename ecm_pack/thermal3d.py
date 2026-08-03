@@ -1,30 +1,27 @@
 # thermal3d.py
 # 电芯多维热模型：支持 1D / 2D / 3D 切换，填入电芯长宽高与各向异性热物性。
-#
+
 # 物理模型：
-#   ρ·cp · ∂T/∂t = ∇·(k·∇T) + q_vol
-#
+# ρ·cp · ∂T/∂t = ∇·(k·∇T) + q_vol
+
 # 其中 q_vol [W/m³] 为体积产热率（来自 ECM 的 heat()/体积）。
 # 边界条件：所有暴露面与外界对流换热 h [W/(m²·K)]，环境温度 T_amb。
-#
+
 # 维度切换：
-#   dim=1 : 仅沿 X(宽度) 方向求解，Y/Z 方向绝热（侧面无限大近似）
-#   dim=2 : 在 X-Y 平面求解，Z 方向绝热
-#   dim=3 : 三个方向完整求解
-#
+# dim=1 : 仅沿 X(宽度) 方向求解，Y/Z 方向绝热（侧面无限大近似）
+# dim=2 : 在 X-Y 平面求解，Z 方向绝热
+# dim=3 : 三个方向完整求解
+
 # 数值方法：
-#   - 结构化均匀网格，有限体积法(FVM)离散；
-#   - 隐式欧拉时间推进，对时间步长无条件稳定；
-#   - 用 scipy.sparse 求解大型稀疏线性方程组。
+# - 结构化均匀网格，有限体积法(FVM)离散；
+# - 隐式欧拉时间推进，对时间步长无条件稳定；
+# - 用 scipy.sparse 求解大型稀疏线性方程组。
 import numpy as np
 from scipy.sparse import csr_matrix
 from scipy.sparse.linalg import spsolve
-
-
 class CellThermalModel:
     """
     单个电芯的多维热模型（1D/2D/3D 可切换，支持非对称冷却）。
-
     参数
     ----
     Lx, Ly, Lz : float [m]
@@ -147,13 +144,14 @@ class CellThermalModel:
         kx, ky, kz = self.kx, self.ky, self.kz
         hx0, hx1, hy0, hy1, hz0, hz1 = self._h_faces
 
-        V = dx * dy * dz
+        V_full = dx * dy * dz                  # 单元(全)控制体体积
         Ax = dy * dz
         Ay = dx * dz
         Az = dx * dy
 
         rows, cols, vals = [], [], []
         boundary_hA = np.zeros(self.N)         # 缓存 hA = Σ(h_face·area_face)
+        V_node = np.empty(self.N)              # 每节点控制体体积(边界减半, 见下)
 
         for i in range(nx):
             for j in range(ny):
@@ -161,64 +159,77 @@ class CellThermalModel:
                     n = self._idx(i, j, k)
                     diag_val = 0.0
 
-                    # X 方向邻居
+                    # 节点控制体边界因子：内部=1，边界=½；退化维(该方向仅 1 节点)
+                    # 节点独占整段→取 1。同步用于“控制体体积”和“控制体各面面积”，
+                    # 以符合顶点中心 FVM 几何：边界节点的控制体在对应方向只占半格，
+                    # 其切向面也须按因子折半，否则 hA/V、g 偏大(边/角尤甚)、几何不一致(S1)。
+                    fx = 0.5 if (nx > 1 and (i == 0 or i == nx - 1)) else 1.0
+                    fy = 0.5 if (ny > 1 and (j == 0 or j == ny - 1)) else 1.0
+                    fz = 0.5 if (nz > 1 and (k == 0 or k == nz - 1)) else 1.0
+
+                    # X 方向邻居（传导面面积随切向因子缩放；对称配对，矩阵保持对称）
                     if nx > 1:
                         if i > 0:
-                            g = kx * Ax / dx
+                            g = kx * Ax / dx * fy * fz
                             rows.append(n); cols.append(self._idx(i-1, j, k))
                             vals.append(-dt * g); diag_val += dt * g
                         if i < nx - 1:
-                            g = kx * Ax / dx
+                            g = kx * Ax / dx * fy * fz
                             rows.append(n); cols.append(self._idx(i+1, j, k))
                             vals.append(-dt * g); diag_val += dt * g
                     # Y 方向邻居
                     if ny > 1:
                         if j > 0:
-                            g = ky * Ay / dy
+                            g = ky * Ay / dy * fx * fz
                             rows.append(n); cols.append(self._idx(i, j-1, k))
                             vals.append(-dt * g); diag_val += dt * g
                         if j < ny - 1:
-                            g = ky * Ay / dy
+                            g = ky * Ay / dy * fx * fz
                             rows.append(n); cols.append(self._idx(i, j+1, k))
                             vals.append(-dt * g); diag_val += dt * g
                     # Z 方向邻居
                     if nz > 1:
                         if k > 0:
-                            g = kz * Az / dz
+                            g = kz * Az / dz * fx * fy
                             rows.append(n); cols.append(self._idx(i, j, k-1))
                             vals.append(-dt * g); diag_val += dt * g
                         if k < nz - 1:
-                            g = kz * Az / dz
+                            g = kz * Az / dz * fx * fy
                             rows.append(n); cols.append(self._idx(i, j, k+1))
                             vals.append(-dt * g); diag_val += dt * g
 
                     # ─── 对流边界（面差异化 h）───
+                    # 对流面面积同样随切向边界因子缩放；退化维(if nd>1 守卫)按设计绝热。
                     hA_node = 0.0
                     if nx > 1:
                         if i == 0:
-                            hA_node += hx0 * Ax
+                            hA_node += hx0 * Ax * fy * fz
                         if i == nx - 1:
-                            hA_node += hx1 * Ax
+                            hA_node += hx1 * Ax * fy * fz
                     if ny > 1:
                         if j == 0:
-                            hA_node += hy0 * Ay
+                            hA_node += hy0 * Ay * fx * fz
                         if j == ny - 1:
-                            hA_node += hy1 * Ay
+                            hA_node += hy1 * Ay * fx * fz
                     if nz > 1:
                         if k == 0:
-                            hA_node += hz0 * Az
+                            hA_node += hz0 * Az * fx * fy
                         if k == nz - 1:
-                            hA_node += hz1 * Az
+                            hA_node += hz1 * Az * fx * fy
                     diag_val += dt * hA_node
                     boundary_hA[n] = hA_node
 
-                    rho_cp_V = self.rho * self.cp * V
+                    # 节点控制体体积：内部全体积，边界减半（面½/棱¼/角⅛）。
+                    # ΣV_node == 真实体积，恢复能量守恒，并消除粗网格温度高估(S1)。
+                    vn = V_full * fx * fy * fz
+                    V_node[n] = vn
+                    rho_cp_V = self.rho * self.cp * vn
                     rows.append(n); cols.append(n)
                     vals.append(rho_cp_V + diag_val)
 
         self._A = csr_matrix((vals, (rows, cols)), shape=(self.N, self.N))
         self._A_dt = dt
-        self._V_cell = V
+        self._V_cell = V_node
         self._boundary_hA_cache = boundary_hA
         # 缓存总对流导 h_total [W/K]：每面 = h_face × 物理面积
         h_total = 0.0
@@ -256,19 +267,31 @@ class CellThermalModel:
 
         # ─── 壳层表面温度（R_shell>0 时计算）───
         if self.R_shell > 0 and self._h_total > 0:
-            T_avg = float(self.T.mean())
+            T_avg = self._T_bulk()
             inv_R = 1.0 / self.R_shell
             self._T_surface = (T_avg * inv_R + self._h_total * Tamb) / (inv_R + self._h_total)
         else:
-            self._T_surface = float(self.T.mean())
+            self._T_surface = self._T_bulk()
         return self.T
+
+    def _T_bulk(self):
+        """体积加权平均温度。
+
+        修复后 _V_cell 为每节点非均匀控制体体积，算术平均会错算“体平均”
+        （边界节点控制体小却被同等加权），对 R_shell 表面温度子模型引入偏差。
+        未构建矩阵(_V_cell 为 None)时回退到算术平均。
+        """
+        V = self._V_cell
+        if V is None:
+            return float(self.T.mean())
+        return float(np.average(self.T, weights=V))
 
     def temperature_stats(self):
         """返回温度场统计：最高、最低、平均、最大温差，及表面温度和体心最高温。"""
         stats = {
             "T_max [K]": float(self.T.max()),
             "T_min [K]": float(self.T.min()),
-            "T_avg [K]": float(self.T.mean()),
+            "T_avg [K]": self._T_bulk(),
             "dT_max [K]": float(self.T.max() - self.T.min()),
         }
         if self.R_shell > 0:
@@ -278,7 +301,7 @@ class CellThermalModel:
 
     @property
     def T_avg(self):
-        return float(self.T.mean())
+        return self._T_bulk()
 
     @property
     def T_max(self):
@@ -331,8 +354,8 @@ class CellThermalModel:
         """
         try:
             import matplotlib.pyplot as plt
-        except ImportError:
-            raise ImportError("plot_slice 需要 matplotlib")
+        except ImportError as e:
+            raise ImportError("plot_slice 需要 matplotlib") from e
 
         if self.dim == 1:
             # 1D：画温度随 X 的曲线
@@ -417,8 +440,8 @@ class CellThermalModel:
         """
         try:
             import matplotlib.pyplot as plt
-        except ImportError:
-            raise ImportError("plot_summary 需要 matplotlib")
+        except ImportError as e:
+            raise ImportError("plot_summary 需要 matplotlib") from e
 
         if self.dim == 1:
             fig, ax = plt.subplots(figsize=(7, 3))
@@ -440,7 +463,7 @@ class CellThermalModel:
             fig.tight_layout()
         else:
             fig, axes = plt.subplots(1, 3, figsize=(14, 4))
-            for ax_i, plane in zip(axes, ("xy", "xz", "yz")):
+            for ax_i, plane in zip(axes, ("xy", "xz", "yz"), strict=True):
                 self.plot_slice(plane=plane, ax=ax_i)
             stats = self.temperature_stats()
             extra = ""
@@ -459,13 +482,10 @@ class CellThermalModel:
             fig.savefig(save_path, dpi=dpi)
         return fig
 
-
 def _slice_index(n, pos):
     """辅助：将分数位置转为切片索引。"""
     if isinstance(pos, int):
         return max(0, min(pos, n - 1))
     return max(0, min(int(round(pos * (n - 1))), n - 1))
-
-
 # 向后兼容别名
 Cell3DThermal = CellThermalModel

@@ -1,22 +1,19 @@
 # pack.py
 # Pack 耦合求解器：把 ECM 电芯 + 电路(MNA) + 热网络 用「双步循环」耦合起来。
-#
+
 # 每一时间步执行：
-#   1) 由当前电芯状态算出 E_k（R0 之后等效电动势）与 R0_k，写入网表；
-#   2) 解 MNA 电路，得到每支路电流 I_k（= 各电芯电流）；
-#   3) 用 I_k 推进每个电芯的电学状态(SoC/RC/扩散)，并算产热；
-#   4) 用产热 + 自定义电芯间导热 + 对流，推进热网络，更新每个电芯温度；
-#   5) 记录端口与每芯输出。
-#
+# 1) 由当前电芯状态算出 E_k（R0 之后等效电动势）与 R0_k，写入网表；
+# 2) 解 MNA 电路，得到每支路电流 I_k（= 各电芯电流）；
+# 3) 用 I_k 推进每个电芯的电学状态(SoC/RC/扩散)，并算产热；
+# 4) 用产热 + 自定义电芯间导热 + 对流，推进热网络，更新每个电芯温度；
+# 5) 记录端口与每芯输出。
+
 # 这正是 liionpack「更新网表 → 解电路 → 步进电化学模型 → 更新热」的范式，
 # 只不过把黑盒 PyBaMM 模型替换成了我们可定制的 ECM 电芯。
-import warnings
-
+import logging
 import numpy as np
-
 from .circuit import solve_circuit
-
-
+logger = logging.getLogger(__name__)
 class Pack:
     def __init__(
         self,
@@ -27,6 +24,7 @@ class Pack:
         v_cut_upper=4.4,
         cell_current_sign=-1.0,
         active=None,
+        strict=True,
     ):
         if len(cells) < 1:
             raise ValueError("至少需要一个电芯")
@@ -38,6 +36,9 @@ class Pack:
         self.v_cut_lower = v_cut_lower
         self.v_cut_upper = v_cut_upper
         self.cell_current_sign = cell_current_sign
+        # strict=True（默认）：初始电路求解失败直接抛异常，避免"零值快照"被
+        # 误当成有效结果继续往下算；strict=False 保留旧的兜底行为（记 error 日志 + 零值初始化）。
+        self.strict = bool(strict)
         # active：当前接入网表的电芯在 self.cells 中的下标，顺序与网表 V 元素一致
         # 拓扑切换时只改 active 与 netlist，电芯自身状态(SoC/RC/T)完全保留
         if active is None:
@@ -52,7 +53,6 @@ class Pack:
         if thermal is not None:
             for k, c in enumerate(self.cells):
                 c.T = thermal.T[k]
-
     def _set_netlist_maps(self, netlist):
         """从网表提取 V / R0 元素行号（顺序即接入电芯顺序）。"""
         df = netlist.df
@@ -81,8 +81,13 @@ class Pack:
             raise ValueError(
                 f"新网表 V 元素数({n_v}) 与 active 数({len(active)}) 不一致"
             )
+        prev_active = list(getattr(self, "active", []))
         self.active = active
         self._set_netlist_maps(netlist)
+        logger.info(
+            "Pack.set_topology 切换拓扑：接入电芯 %d -> %d 颗，active=%s",
+            len(prev_active), len(active), active,
+        )
         # 立即把当前电芯状态写入新网表，保证切换后首步 MNA 解正确
         for k, idx in enumerate(self.active):
             cell = self.cells[idx]
@@ -93,7 +98,7 @@ class Pack:
             self.netlist.df.at[self.ri_rows[k], "value"] = R0_raw + Rc
         # 温度同步（新接入电芯的温度对齐到电芯对象）
         if self.thermal is not None:
-            for k, idx in enumerate(self.active):
+            for idx in self.active:
                 self.thermal.T[idx] = self.cells[idx].T
 
     def _refresh_R0(self, I_prev):
@@ -160,9 +165,15 @@ class Pack:
                 Vn0, Ib0, It0, Vt0, Pt0 = solve_circuit(self.netlist, power=control[0])
             Ic0 = self.cell_current_sign * Ib0
         except Exception as _e:
-            warnings.warn(
-                f"Pack.solve 初始电路求解失败，将以零值初始化 t=0 快照 "
-                f"(请检查网表/控制量是否合法): {type(_e).__name__}: {_e}"
+            if self.strict:
+                raise RuntimeError(
+                    f"Pack.solve 初始电路求解失败（网表/控制量可能非法）: "
+                    f"{type(_e).__name__}: {_e}。"
+                    f"若确需以零值快照继续，请构造 Pack(..., strict=False)。"
+                ) from _e
+            logger.error(
+                "Pack.solve 初始电路求解失败，strict=False，以零值初始化 t=0 快照: %s: %s",
+                type(_e).__name__, _e,
             )
             Vn0, It0, Vt0, Pt0, Ic0 = (np.zeros(N + 1), 0.0, 0.0, 0.0, np.zeros(N))
         Ic0_full = np.zeros(N)
@@ -247,7 +258,18 @@ class Pack:
                     else:
                         Vn0, Ib0, It0, Vt0, Pt0 = solve_circuit(self.netlist, power=control[s])
                     Ic0 = self.cell_current_sign * Ib0
-                except Exception:
+                except Exception as _e:
+                    # 与初始解保持同一套 strict 语义：默认抛错，不静默零值兜底。
+                    if self.strict:
+                        raise RuntimeError(
+                            f"Pack.solve 在 t={t:.3f}s 拓扑切换后重解电路失败: "
+                            f"{type(_e).__name__}: {_e}。"
+                            f"若确需以零值快照继续，请构造 Pack(..., strict=False)。"
+                        ) from _e
+                    logger.error(
+                        "Pack.solve t=%.3fs 拓扑切换后重解失败，strict=False，以零值快照继续: %s: %s",
+                        t, type(_e).__name__, _e,
+                    )
                     Vn0, Ib0, It0, Vt0, Ic0 = (np.zeros(N + 1), np.zeros(1), 0.0, 0.0, np.zeros(len(self.active)))
                 Ic0_full = np.zeros(N)
                 for k, idx in enumerate(self.active):
@@ -255,10 +277,20 @@ class Pack:
                 active_set = set(self.active)
 
             ctrl = control[s]
-            if control_type == "current":
-                V_node, I_batt, I_term, V_term, P_term = solve_circuit(self.netlist, current=ctrl)
-            else:
-                V_node, I_batt, I_term, V_term, P_term = solve_circuit(self.netlist, power=ctrl)
+            try:
+                if control_type == "current":
+                    V_node, I_batt, I_term, V_term, P_term = solve_circuit(self.netlist, current=ctrl)
+                else:
+                    V_node, I_batt, I_term, V_term, P_term = solve_circuit(self.netlist, power=ctrl)
+            except Exception as _e:
+                # 主循环求解失败无法用零值"继续"（后续状态推进会全盘污染），
+                # 因此无论 strict 与否都终止；这里只是补上时间/步号等定位信息，
+                # 避免抛出裸 LinAlgError 让用户无从排查。
+                raise RuntimeError(
+                    f"Pack.solve 在 t={t:.3f}s (step {s + 1}/{n_steps}) 求解电路失败: "
+                    f"{type(_e).__name__}: {_e}。"
+                    f"常见原因：控制量超出可行域（功率控制无实数解）、网表奇异、R0 为 0。"
+                ) from _e
             I_cell_active = self.cell_current_sign * I_batt  # 仅激活电芯
 
             # 全量数组（未接入电芯：电流 0、状态冻结）
@@ -277,7 +309,10 @@ class Pack:
                 V_cell[idx] = Vt
                 soc[idx] = cell.soc
                 T[idx] = cell.T
-                Rint[idx] = abs((cell.voltage_behind_R0() + I * R0 - Vt) / (I + 1e-12))
+                # Rint = (R0 之后等效电动势 E - 端电压 Vt) / I，恒等于本步 R0。
+                # 历史 bug：曾写作 (E + I*R0 - Vt)/I，因 Vt = E - I*R0，
+                # 分子展开为 2*I*R0，使输出"内阻"整整放大一倍。
+                Rint[idx] = abs((cell.voltage_behind_R0() - Vt) / (I + 1e-12))
                 Td_cell = cell.T - 273.15
                 Rc = float(cell.spec.R_contact(Td_cell, I, cell.soc))
                 Q[idx] = cell.heat(I, R0) + I**2 * Rc
@@ -305,9 +340,16 @@ class Pack:
             if (s + 1) % record_every == 0 or s == n_steps - 1:
                 self._snapshot(t, record, V_node, I_term, V_term, P_term, I_cell, V_cell, soc, T, Rint, topo)
 
-            if np.any(V_cell[self.active] < self.v_cut_lower) or np.any(V_cell[self.active] > self.v_cut_upper):
+            V_act = V_cell[self.active]
+            if np.any(V_act < self.v_cut_lower) or np.any(V_act > self.v_cut_upper):
                 terminated = True
                 term_step = s + 1
+                logger.info(
+                    "Pack.solve 在 t=%.1fs (step %d/%d) 触发电压截止并提前终止："
+                    "Vmin=%.4fV Vmax=%.4fV，限值 [%.3f, %.3f]V",
+                    t, s + 1, n_steps, float(V_act.min()), float(V_act.max()),
+                    self.v_cut_lower, self.v_cut_upper,
+                )
                 break
 
         out["Terminated"] = terminated
@@ -339,3 +381,4 @@ class Pack:
             T = np.array([c.T for c in self.cells])
             Rint = np.array([c.spec.R0(c.T - 273.15, 0.0, c.soc) for c in self.cells])
         record(t, V_node, I_term, V_term, P_term, I_cell, V_cell, soc, T, Rint, topo)
+

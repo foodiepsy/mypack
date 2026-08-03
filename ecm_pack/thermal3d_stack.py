@@ -1,31 +1,30 @@
 # thermal3d_stack.py
 # 多电芯三维热模型（复合有限体积）：把若干电芯沿 Y(厚度) 轴大面背靠背直接堆叠，
 # 泡棉只贴在电芯「薄侧」(侧向 X/Z 小面) 与空气连接，外边界逐面非对称对流冷却。
-#
+
 # 几何约定（按用户修正，2026-07-28）：
-#   - 8 颗电芯沿 Y(厚度) 大面背靠背直接贴合，电芯之间「没有泡棉」；
-#   - 泡棉只贴在特定薄侧面（由 foam_faces 指定，不一定是全部薄侧面），
-#     无泡棉的薄侧面直接接空气对流（h_side、T_amb）；
-#   - 顶部放塑料片（薄层，导热率 > 泡棉），再对流到 25°C 环境；
-#   - 底部绝热（无换热）；
-#   - 全局环境为 25°C 强制自然对流。
-#
+# - 8 颗电芯沿 Y(厚度) 大面背靠背直接贴合，电芯之间「没有泡棉」；
+# - 泡棉只贴在特定薄侧面（由 foam_faces 指定，不一定是全部薄侧面），
+# 无泡棉的薄侧面直接接空气对流（h_side、T_amb）；
+# - 顶部放塑料片（薄层，导热率 > 泡棉），再对流到 25°C 环境；
+# - 底部绝热（无换热）；
+# - 全局环境为 25°C 强制自然对流。
+
 # 与 CellThermalModel 同一思路：
-#   rho*cp * dT/dt = nabla·(k·nabla T) + q_vol
-#   - 结构化均匀网格，有限体积法(FVM)离散；
-#   - 隐式欧拉时间推进，对时间步长无条件稳定；
-#   - scipy.sparse 稀疏矩阵 + 常量矩阵 LU 分解复用。
+# rho*cp * dT/dt = nabla·(k·nabla T) + q_vol
+# - 结构化均匀网格，有限体积法(FVM)离散；
+# - 隐式欧拉时间推进，对时间步长无条件稳定；
+# - scipy.sparse 稀疏矩阵 + 常量矩阵 LU 分解复用。
+import logging
 import numpy as np
 from scipy.sparse import csr_matrix
 from scipy.sparse.linalg import splu
-
-
+logger = logging.getLogger(__name__)
 class StackThermal3D:
     """
     沿 Y(厚度) 轴堆叠 n_cells 颗电芯的三维热模型。
     电芯大面背靠背直接贴合（电芯间无泡棉）；泡棉只贴在指定薄侧；
     无泡棉的薄侧直接空气对流；顶部可配塑料薄层串联对流。
-
     参数
     ----
     n_cells : int
@@ -127,6 +126,9 @@ class StackThermal3D:
         self.T = np.full(self.n_cells, self.T_init)
         self._t = 0.0
 
+        # ---- 预计算热源分配/均值稀疏矩阵（避免 step 内 Python 循环）----
+        self._build_maps()
+
         self._A = None
         self._lu = None
         self._dt = None
@@ -141,25 +143,88 @@ class StackThermal3D:
     def reshape(self):
         return self.T_field.reshape(self.NX, self.NY, self.NZ)
 
-    def _side_conductance(self, A_face):
-        """薄侧泡棉+空气对流串联：g = A / (d_foam/k_foam + 1/h_side)"""
+    def _build_maps(self):
+        """预计算两个静态稀疏矩阵（仅依赖网格与节点归属，构建一次）：
+
+        - 热源分配矩阵 ``S`` (N x n_cells)：``src = S @ Q`` 等效于逐节点
+          ``src[n] = Q[c] * vol[n] / V_cell``，把每颗电芯总产热按其节点体积比
+          均匀分配到该芯各控制体（均匀网格下即等权 1/(nx*ny*nz)）。
+        - 均值矩阵 ``W`` (n_cells x N)：``T_cell = W @ T_field`` 等效于逐芯
+          ``T_field[cell==c].mean()``，取每芯节点温度均值。
+        """
+        N, nc = self.N, self.n_cells
+        rows_S, cols_S, data_S = [], [], []
+        rows_W, cols_W = [], []
+        for n in range(N):
+            c = self._cell[n]
+            if c < 0:
+                continue
+            rows_S.append(n)
+            cols_S.append(c)
+            data_S.append(self._vol[n] / self._V_cell)
+            rows_W.append(c)
+            cols_W.append(n)
+        self._S = csr_matrix((data_S, (rows_S, cols_S)), shape=(N, nc))
+        # 注意：rows_W 装的是电芯索引 c，cols_W 装的是节点索引 n；
+        # 统计「每芯节点数」必须 bincount(rows_W)，而非 cols_W。
+        self._cell_counts = np.bincount(rows_W, minlength=nc).astype(float)
+        data_W = [1.0 / self._cell_counts[c] for c in rows_W]
+        self._W = csr_matrix((data_W, (rows_W, cols_W)), shape=(nc, N))
+        self._empty_cells = self._cell_counts == 0
+        if self._empty_cells.any():
+            logger.warning(
+                "StackThermal3D 有 %d 颗电芯未分配到任何网格节点（索引 %s），"
+                "其温度将固定为 T_init=%.2fK。请检查 ny 是否过小。",
+                int(self._empty_cells.sum()),
+                np.flatnonzero(self._empty_cells).tolist(),
+                self.T_init,
+            )
+        logger.debug(
+            "StackThermal3D 映射矩阵就绪：N=%d 节点, n_cells=%d, 每芯节点数=%s",
+            N, nc, np.unique(self._cell_counts[~self._empty_cells]).tolist(),
+        )
+
+    def _side_conductance(self, A_face, R_half, foam):
+        """薄侧边界半控制体串联热阻：g = A_face / (R_half + R_ext)。
+
+        节点到外边界只占半个网格宽度，热流须先穿过这段电芯材料才能抵达
+        外表面（泡棉/空气），漏掉 R_half 会低估总热阻、高估散热。
+
+        R_half = (dx/2)/kx (X 面) 或 (dz/2)/kz (Z 面)，为节点到边界的半控制体导热热阻；
+        R_ext   = 泡棉层+空气 (foam) 或直接空气 (bare) 的外部串联热阻。
+        """
         if self.h_side <= 0:
             return 0.0
-        return A_face / (self.foam_thickness / self.foam_k + 1.0 / self.h_side)
+        if foam:
+            R_ext = self.foam_thickness / self.foam_k + 1.0 / self.h_side
+        else:
+            R_ext = 1.0 / self.h_side
+        return A_face / (R_half + R_ext)
 
-    def _top_conductance(self, Ay):
-        """顶部塑料薄层+空气：g = Ay / (d_top/k_top + 1/h_top)；k_top=0 时直接对流"""
+    def _top_conductance(self, Ay, R_half):
+        """顶部边界半控制体串联：g = Ay / (R_half + R_ext)。
+
+        R_half = (dy/2)/ky 为顶部节点到 y=0 边界的半控制体导热热阻；
+        R_ext   = 塑料薄层+空气 (k_top>0) 或直接空气。k_top=0 时直接对流。
+        """
         if self.h_top <= 0:
             return 0.0
         if self.k_top > 0 and self.d_top > 0:
-            return Ay / (self.d_top / self.k_top + 1.0 / self.h_top)
-        return self.h_top * Ay
+            return Ay / (R_half + self.d_top / self.k_top + 1.0 / self.h_top)
+        return Ay / (R_half + 1.0 / self.h_top)
 
     def _build(self, dt):
         dx, dz = self.dx, self.dz
         NX, NY, NZ = self.NX, self.NY, self.NZ
         rows, cols, vals = [], [], []
         self._bc_rhs = np.zeros(self.N)
+
+        # 边界半控制体导热热阻：节点到外边界只占半个网格宽度，必须计入，
+        # 否则会低估热阻、高估散热（S2 修复项）。
+        # 与内部节点间热阻 dx/kx 严格自洽：两段半控制体相加 = 整段 dx/kx。
+        R_half_x = (dx / 2.0) / self.cell_kx
+        R_half_z = (dz / 2.0) / self.cell_kz
+        R_half_y = (self.Ly / self.ny) / 2.0 / self.cell_ky
 
         foam_x0 = "x0" in self.foam_faces
         foam_x1 = "x1" in self.foam_faces
@@ -173,10 +238,10 @@ class StackThermal3D:
                 Ax = dy * dz
                 Ay = dx * dz
                 Az = dx * dy
-                gx_foam = self._side_conductance(Ax)
-                gx_bare = self.h_side * Ax if self.h_side > 0 else 0.0
-                gz_foam = self._side_conductance(Az)
-                gz_bare = self.h_side * Az if self.h_side > 0 else 0.0
+                gx_foam = self._side_conductance(Ax, R_half_x, True)
+                gx_bare = self._side_conductance(Ax, R_half_x, False)
+                gz_foam = self._side_conductance(Az, R_half_z, True)
+                gz_bare = self._side_conductance(Az, R_half_z, False)
                 for k in range(NZ):
                     n = self._idx(i, j, k)
                     diag = 0.0
@@ -218,15 +283,15 @@ class StackThermal3D:
 
                     # ---- 顶部：塑料薄层 + 25°C 强制对流 (或直接对流) ----
                     if j == 0:
-                        g_top = self._top_conductance(Ay)
+                        g_top = self._top_conductance(Ay, R_half_y)
                         if g_top > 0:
                             diag += dt * g_top
                             self._bc_rhs[n] += g_top * self.T_top
                     # ---- 底部：纯对流（或绝热）----
                     if j == NY - 1 and self.h_bottom > 0:
-                        hA = self.h_bottom * Ay
-                        diag += dt * hA
-                        self._bc_rhs[n] += hA * self.T_bottom
+                        g = Ay / (R_half_y + 1.0 / self.h_bottom)
+                        diag += dt * g
+                        self._bc_rhs[n] += g * self.T_bottom
                     # ---- 薄侧：贴泡棉的面 = 泡棉+空气串联；不贴泡棉的面 = 直接空气对流 ----
                     if i == 0:
                         g = gx_foam if foam_x0 else gx_bare
@@ -254,6 +319,19 @@ class StackThermal3D:
         self._A = csr_matrix((vals, (rows, cols)), shape=(self.N, self.N))
         self._lu = splu(self._A.tocsc())
         self._dt = dt
+        # LU 分解是本模型最贵的一步（O(N^1.5~2)），只应在 dt 变化时发生一次。
+        # 若日志里反复出现这行，说明调用方在变步长，性能会显著劣化。
+        self._n_factorizations = getattr(self, "_n_factorizations", 0) + 1
+        logger.debug(
+            "StackThermal3D LU 重分解 #%d：dt=%.4gs, N=%d 节点, nnz=%d",
+            self._n_factorizations, dt, self.N, self._A.nnz,
+        )
+        if self._n_factorizations > 1:
+            logger.info(
+                "StackThermal3D 因 dt 变化触发第 %d 次 LU 重分解（dt=%.4gs）；"
+                "固定步长可避免此开销。",
+                self._n_factorizations, dt,
+            )
 
     def _gy_conductance(self, n, nb, Ay):
         kA = self._ky[n]; kB = self._ky[nb]
@@ -269,17 +347,16 @@ class StackThermal3D:
             raise ValueError(f"Q 长度须为 n_cells={self.n_cells}，收到 {Q.size}")
         if self._A is None or self._dt is None or abs(self._dt - dt) > 1e-12:
             self._build(dt)
-        src = np.zeros(self.N)
-        for n in range(self.N):
-            c = self._cell[n]
-            if c >= 0:
-                src[n] = Q[c] * self._vol[n] / self._V_cell
+        # 向量化热源分配：src = S @ Q（等价于逐节点 Q[c]*vol/V_cell）
+        src = self._S @ Q
         rhs = self._C * self.T_field + dt * (src + self._bc_rhs)
         self.T_field = self._lu.solve(rhs)
         self._t = t
-        for c in range(self.n_cells):
-            mask = self._cell == c
-            self.T[c] = float(self.T_field[mask].mean()) if mask.any() else self.T_init
+        # 向量化均值：T_cell = W @ T_field（等价于逐芯 mask.mean()）
+        T_cell = np.asarray(self._W @ self.T_field).ravel()
+        if self._empty_cells.any():
+            T_cell = np.where(self._empty_cells, self.T_init, T_cell)
+        self.T = T_cell
         return self.T.copy()
 
     def temperature_stats(self):
@@ -380,9 +457,9 @@ class StackThermal3D:
         and an air-convection / adiabatic marker on the bottom face
         (y=n*Ly). All labels are ASCII-only to avoid encoding issues.
         """
-        from mpl_toolkits.mplot3d.art3d import Poly3DCollection, Line3DCollection
-        import matplotlib.pyplot as plt
         import matplotlib.patches as mpatches
+        import matplotlib.pyplot as plt
+        from mpl_toolkits.mplot3d.art3d import Line3DCollection, Poly3DCollection
 
         if ax is None:
             fig = plt.figure(figsize=figsize)
@@ -718,3 +795,4 @@ class StackThermal3D:
         if save_path:
             fig.savefig(save_path, dpi=dpi)
         return fig, ax
+

@@ -1,29 +1,26 @@
 # topology_demo.py  ——  拓扑热切换演示
-#
+
 # 用户场景：一组 8S 先工作 10 min，之后另一组 8S 并入，两组并联共同工作。
 # 这验证 ecm_pack 的「可重构电池包」能力：
-#   1) 电芯状态(SoC/RC/温度)与网表解耦 —— 切换只换网表与 active 映射；
-#   2) 被断开的 group B 在待机期间状态完全冻结；
-#   3) group B 并入瞬间，MNA 自动产生组间环流/浪涌（高 SoC 组给低 SoC 组充电）；
-#   4) 之后两组 SoC 被均衡，整包容量/电流能力翻倍。
-import sys, os
-import numpy as np
+# 1) 电芯状态(SoC/RC/温度)与网表解耦 —— 切换只换网表与 active 映射；
+# 2) 被断开的 group B 在待机期间状态完全冻结；
+# 3) group B 并入瞬间，MNA 自动产生组间环流/浪涌（高 SoC 组给低 SoC 组充电）；
+# 4) 之后两组 SoC 被均衡，整包容量/电流能力翻倍。
+import os
+import sys
 import matplotlib
+import numpy as np
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import matplotlib.font_manager as fm
-
+import matplotlib.pyplot as plt
 # 注册系统中文字体（Noto Sans CJK），避免图里中文显示为方块
 _CJK = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
 if os.path.exists(_CJK):
     fm.fontManager.addfont(_CJK)
     plt.rcParams["font.family"] = fm.FontProperties(fname=_CJK).get_name()
 plt.rcParams["axes.unicode_minus"] = False
-
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
 import ecm_pack as ep
-
-
 # ----------------------------------------------------------------------------
 # 复用 demo 的可定制 ECM 规格（工业风格）
 # ----------------------------------------------------------------------------
@@ -31,39 +28,26 @@ def make_ocv():
     s = np.linspace(0, 1, 101)
     v = 3.2 + 0.95 * s + 0.08 * np.sin(2 * np.pi * s) + 0.1 * s**2
     return ep.lookup_1d(s, v)
-
-
 def R0_of(Tdeg, I, soc):
     return 0.01 * (1.0 + 0.6 * (1.0 - soc)) * np.exp(2000.0 * (1.0 / 298.15 - 1.0 / (Tdeg + 273.15))) + 1e-5 * abs(I)
-
-
 def R1_of(Tdeg, I, soc):
     return 0.5 * R0_of(Tdeg, I, soc)
-
-
 def C1_of(Tdeg, I, soc):
     return 6000.0
-
-
 def dUdT_of(Tdeg, soc):
     return -1e-4 + 2e-4 * soc
-
-
 def build_spec(soc_init=1.0, T_init=298.15):
     return ep.ECMCellSpec(
         capacity=5.0,
         ocv=make_ocv(), R0=R0_of, R=[R1_of], C=[C1_of], dUdT=dUdT_of,
         soc_init=soc_init, T_init=T_init,
     )
-
-
 def main():
     nS = 8
     # group A: cells 0..7 先工作；group B: cells 8..15 待机后并入
-    specs = [build_spec(soc_init=0.80, T_init=298.15) for _ in range(nS)] + \
-            [build_spec(soc_init=1.00, T_init=298.15) for _ in range(nS)]
+    specs = [build_spec(soc_init=0.80, T_init=298.15) for _ in range(nS)] \
+            + [build_spec(soc_init=1.00, T_init=298.15) for _ in range(nS)]
     cells = [ep.ECMCell(sp) for sp in specs]
-
     nl_solo, act_solo, nl_par, act_par = ep.setup_two_group(nS)
 
     # 自定义电芯间导热：16 芯沿一条链相邻导热 G=5 W/K（演示需求 4 仍可用）
@@ -147,7 +131,6 @@ def main():
     fig.tight_layout(rect=[0, 0, 1, 0.97])
     fig.savefig(os.path.join(os.path.dirname(os.path.abspath(__file__)), "result", "ecm_pack_topology_demo.png"), dpi=130)
     print("\n图表已保存 -> /workspace/ecm_pack_topology_demo.png")
-
 
 if __name__ == "__main__":
     main()

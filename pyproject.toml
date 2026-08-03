@@ -1,0 +1,42 @@
+[project]
+name = "mypack"
+version = "0.1.0"
+description = "PyBaMM 风格 Thévenin ECM + liionpack MNA 电路 + 三维有限体积热模型的电池包耦合仿真库"
+requires-python = ">=3.10"
+dependencies = [
+"numpy",
+"scipy",
+"pandas",
+"matplotlib",
+]
+[project.optional-dependencies]
+filterwarnings = [
+# 中文字体缺失导致的 matplotlib glyph 警告，与被测逻辑无关
+"ignore:Glyph .* missing from font.*:UserWarning",
+]
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+exclude = [
+".git",
+"__pycache__",
+# 历史 demo 快照，保留原样以便和历史结果对照，不参与 lint
+"ecm_pack/examples/demo_old",
+]
+[tool.ruff.lint]
+# 起步阶段只启用「真 bug」类规则，保证 CI 一开始就是绿的、可信的。
+# 风格类规则（RUF/C4/UP/SIM 等）后续逐个开、逐个清，避免一次性 90+ 报错让 CI 变成噪音。
+select = [
+"E",  # pycodestyle 错误
+"F",  # pyflakes（未定义名、未使用导入/变量）
+"W",  # pycodestyle 警告
+"I",  # isort（导入顺序）
+"B",  # flake8-bugbear（常见陷阱，如可变默认参数）
+]
+ignore = [
+"E741",  # 允许 l/I/O 之类单字母变量（物理公式里 I=电流 是刚需）
+"E402",  # demo/测试里需要先 sys.path.insert 再 import 本地包
+"E501",  # ruff 按字符显示宽度算长度，中文注释一律按 2 宽，几乎全是误报
+"E701",  # 同行多语句：FVM 索引拼装与 matplotlib 轴设置刻意写紧凑
+"E702",  # 同上（分号分隔）
+]

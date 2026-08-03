@@ -1,37 +1,34 @@
 # demo_8s2p_200a.py  ——  8S2P / 总负载 200A 工况：重点考察「环流」
-#
-# 用户场景：
-#   一组 8S（支路 A，电芯 0..7）先单独承受 200A 总负载工作 0.1 h（=360 s），
-#   期间支路 B（电芯 8..15）闲时待机、保持 SoC=1.0 不变；
-#   随后 t=360 s 支路 B 从闲时并入，整包变为 8S2P，两组并联共同承担 200A 总负载。
-#
-# 关注点：环流 (circulation)
-#   并入瞬间，A 组已放电到 SoC≈0.936（OCV 偏低），B 组仍为 1.0（OCV 偏高）。
-#   两组在电气上并联，MNA 自动解算出一个「组间环流」：
-#     - 高 SoC 的 B 组向低 SoC 的 A 组倒灌电流（给 A 充电/减缓 A 放电）；
-#     - 环流大小 = (I_B - I_A) / 2，随时间按两组的 SoC（电压）差指数衰减直至均衡。
-#
-# 使用用户指定的 314Ah 大电芯默认参数（cell_314ah_spec）：
-#   R0=R1=0.4 mΩ, τ=100 s, C1=250 kF；尺寸 174×71.7×207 mm；
-#   rho=2300, cp=1000, k=(12, 0.7, 11.6) W/(m·K)。
-import sys, os
-import numpy as np
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import matplotlib.font_manager as fm
 
+# 用户场景：
+# 一组 8S（支路 A，电芯 0..7）先单独承受 200A 总负载工作 0.1 h（=360 s），
+# 期间支路 B（电芯 8..15）闲时待机、保持 SoC=1.0 不变；
+# 随后 t=360 s 支路 B 从闲时并入，整包变为 8S2P，两组并联共同承担 200A 总负载。
+
+# 关注点：环流 (circulation)
+# 并入瞬间，A 组已放电到 SoC≈0.936（OCV 偏低），B 组仍为 1.0（OCV 偏高）。
+# 两组在电气上并联，MNA 自动解算出一个「组间环流」：
+# - 高 SoC 的 B 组向低 SoC 的 A 组倒灌电流（给 A 充电/减缓 A 放电）；
+# - 环流大小 = (I_B - I_A) / 2，随时间按两组的 SoC（电压）差指数衰减直至均衡。
+
+# 使用用户指定的 314Ah 大电芯默认参数（cell_314ah_spec）：
+# R0=R1=0.4 mΩ, τ=100 s, C1=250 kF；尺寸 174×71.7×207 mm；
+# rho=2300, cp=1000, k=(12, 0.7, 11.6) W/(m·K)。
+import os
+import sys
+import matplotlib
+import numpy as np
+matplotlib.use("Agg")
+import matplotlib.font_manager as fm
+import matplotlib.pyplot as plt
 # 注册系统中文字体（Noto Sans CJK），避免图里中文显示为方块
 _CJK = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
 if os.path.exists(_CJK):
     fm.fontManager.addfont(_CJK)
     plt.rcParams["font.family"] = fm.FontProperties(fname=_CJK).get_name()
 plt.rcParams["axes.unicode_minus"] = False
-
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
 import ecm_pack as ep
-
-
 def main():
     # ---- 工况参数 ----
     nS = 8                       # 每支路串数（支路 A = 0..7，支路 B = 8..15）
@@ -42,13 +39,12 @@ def main():
     t_post = 600.0               # 并入后再跑 600 s，观察环流衰减与 SoC 均衡
     n_steps = int(round(t_solo + t_post))
     record_every = 1
-
     print("=" * 70)
     print(" 8S2P / 总负载 200A 工况 —— 重点考察「环流」")
     print("=" * 70)
-    print(f" 电芯规格         : 314Ah 大电芯（cell_314ah_spec）")
+    print(" 电芯规格         : 314Ah 大电芯（cell_314ah_spec）")
     print(f" 支路 A (电芯0..7): 单独承担 200A 工作 {t_solo:.0f}s ({t_solo/3600:.2f}h)")
-    print(f" 支路 B (电芯8..15): 闲时待机，SoC 保持 1.0")
+    print(" 支路 B (电芯8..15): 闲时待机，SoC 保持 1.0")
     print(f" 切换时刻 t={t_solo:.0f}s : 支路 B 并入 → 8S2P，两组并联共担 200A")
     print(f" 步长 dt={dt}s, 总步数={n_steps} (含并入后 {t_post:.0f}s)")
     print("=" * 70)
@@ -230,7 +226,6 @@ def main():
         fmt="%.6f",
     )
     print(f" 数据已保存: {out_csv}")
-
 
 if __name__ == "__main__":
     main()

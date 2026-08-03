@@ -1,16 +1,11 @@
 # 整包耦合与拓扑热切换单元测试
 import numpy as np
-
 import ecm_pack as ep
-
-
 def _spec(soc_init=1.0, capacity=5.0):
     return ep.ECMCellSpec(
         capacity=capacity, ocv=lambda s: 3.2 + 0.95 * s,
         R0=0.01, R=[0.005], C=[6000.0], dUdT=-1e-4, soc_init=soc_init,
     )
-
-
 def test_pack_current_control_single_string():
     """2S 单串恒流放电：端口电压 ≈ 2·单芯电压 - I·ΣR0，SoC 下降。"""
     specs = [_spec(0.9) for _ in range(2)]
@@ -24,8 +19,6 @@ def test_pack_current_control_single_string():
     assert Vt[-1] < Vt[0]
     # SoC 下降
     assert out["Cell SoC"][-1, 0] < out["Cell SoC"][0, 0]
-
-
 def test_topology_switch_preserves_cell_state():
     """拓扑切换不改变断开电芯的 SoC（状态冻结）。"""
     nS = 4
@@ -42,8 +35,6 @@ def test_topology_switch_preserves_cell_state():
     # 切换本身不改变任何电芯 SoC
     assert abs(cells[0].soc - soc_A_before) < 1e-12
     assert abs(cells[nS].soc - soc_B_before) < 1e-12
-
-
 def test_topology_switch_produces_circulation():
     """8S→8S2P 切换瞬间应出现环流：高压组放电、低压组被充电。"""
     nS = 4
@@ -62,8 +53,6 @@ def test_topology_switch_produces_circulation():
     # 高压 B 组放电、低压 A 组被充电
     assert cB > 0, "高压组应放电(环流)"
     assert cA < 0, "低压组应被充电(环流)"
-
-
 def test_recorded_output_shapes():
     """输出数组维度与 N_total 对齐，未接入电芯电流记 0。"""
     nS = 4
@@ -76,8 +65,6 @@ def test_recorded_output_shapes():
     assert out["Cell current [A]"].shape == (6, N)  # 5 步 + t=0
     # 未接入的 group B 电流应全部为 0
     assert np.all(out["Cell current [A]"][:, nS:] == 0.0)
-
-
 def test_contact_resistance_heat():
     """R_contact>0 时产热应比无接触电阻时更高。"""
     # 无接触电阻
@@ -88,7 +75,6 @@ def test_contact_resistance_heat():
     pack0 = ep.Pack(cells0, nl, v_cut_lower=2.0)
     out0 = pack0.solve(dt=10.0, control=2.0, control_type="current", n_steps=5)
     Vt0 = out0["Pack terminal voltage [V]"]
-
     # 有接触电阻 1 mΩ
     specs1 = [ep.ECMCellSpec(capacity=5.0, ocv=lambda s: 3.2, R0=0.01,
                              R_contact=0.001, soc_init=0.9) for _ in range(2)]
@@ -102,11 +88,10 @@ def test_contact_resistance_heat():
         f"有接触电阻端电压({Vt1[-1]:.4f})应低于无接触电阻({Vt0[-1]:.4f})"
     )
 
-    # SoC 下降也应更快（相同电流、更多能量消耗在 R_contact 上... 
+    # SoC 下降也应更快（相同电流、更多能量消耗在 R_contact 上...
     # 但实际上 SoC 只取决于电流积分，相同电流相同时间 SoC 下降应相同。
     # R_contact 的影响体现在端电压更低上。
     assert abs(out0["Cell SoC"][-1, 0] - out1["Cell SoC"][-1, 0]) < 1e-6
-
 
 def test_contact_resistance_clone():
     """clone() 应携带 R_contact。"""
@@ -114,8 +99,6 @@ def test_contact_resistance_clone():
                           R_contact=0.002, soc_init=0.9)
     s2 = spec.clone()
     assert float(s2.R_contact(25.0, 0.0, 0.9)) == 0.002
-
-
 def test_contact_resistance_terminals():
     """R_contact 应反映在端电压中（每 cell 压降 = I·R_contact）。"""
     spec = ep.ECMCellSpec(capacity=5.0, ocv=lambda s: 3.2, R0=0.01,

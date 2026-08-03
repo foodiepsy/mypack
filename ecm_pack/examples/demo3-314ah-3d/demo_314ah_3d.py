@@ -1,26 +1,23 @@
 # demo_314ah_3d.py  —�?  314Ah 大电�? + 多维热模�?(1D/2D/3D)演示
-#
-# 演示�?
-#   1) 使用内置 314Ah 储能大电芯默认参数（用户指定的精确参数）�?
-#   2) 同一电芯分别�? 1D / 2D / 3D 热模型求解，对比温度场差异；
-#   3) 展示三维温度场内部分布切片�?
-import sys, os
-import numpy as np
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import matplotlib.font_manager as fm
 
+# 演示�?
+# 1) 使用内置 314Ah 储能大电芯默认参数（用户指定的精确参数）�?
+# 2) 同一电芯分别�? 1D / 2D / 3D 热模型求解，对比温度场差异；
+# 3) 展示三维温度场内部分布切片�?
+import os
+import sys
+import matplotlib
+import numpy as np
+matplotlib.use("Agg")
+import matplotlib.font_manager as fm
+import matplotlib.pyplot as plt
 _CJK = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
 if os.path.exists(_CJK):
     fm.fontManager.addfont(_CJK)
     plt.rcParams["font.family"] = fm.FontProperties(fname=_CJK).get_name()
 plt.rcParams["axes.unicode_minus"] = False
-
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
 import ecm_pack as ep
-
-
 def run_one(dim, nx, ny, nz, I_load=314.0, dt=2.0, n_steps=300):
     """用指定维度热模型跑一次耦合仿真，返回时序与末态统计�?"""
     spec = ep.cell_314ah_spec(soc_init=0.5, T_init=298.15)
@@ -47,20 +44,17 @@ def run_one(dim, nx, ny, nz, I_load=314.0, dt=2.0, n_steps=300):
         "t": np.array(t_hist), "T_max": np.array(T_max_h),
         "T_avg": np.array(T_avg_h), "V": np.array(V_h),
     }
-
-
 def main():
     print("===== 314Ah 大电�? + 多维热模�?(1D/2D/3D) =====")
     spec = ep.cell_314ah_spec(soc_init=0.5)
     print(f"容量: {spec.capacity} Ah")
-    print(f"尺寸: 宽{spec.Lx*1e3:.1f} × 厚{spec.Ly*1e3:.1f} × 高{spec.Lz*1e3:.1f} mm  "
-          f"(体积 {spec.Lx*spec.Ly*spec.Lz*1e3:.2f} L)")
+    print(f"尺寸: 宽{spec.Lx*1e3:.1f} × 厚{spec.Ly*1e3:.1f} × 高{spec.Lz*1e3:.1f} mm  "*
+    f"(体积 {spec.Lxspec.Ly*spec.Lz*1e3:.2f} L)")
     print(f"密度: {spec.rho} kg/m³, 比热: {spec.cp} J/(kg·K)")
     print(f"导热: kx={spec.k[0]} ky={spec.k[1]} kz={spec.k[2]} W/(m·K) (各向异�?)")
-    print(f"内阻: R0=0.4mΩ, R1=0.4mΩ, τ=100s")
+    print("内阻: R0=0.4mΩ, R1=0.4mΩ, τ=100s")
     print(f"初始 SoC: {spec.soc_init}, OCV: {ep.ECMCell(spec).ocv():.3f} V")
     print()
-
     # 三种维度对比
     configs = [
         ("1D (仅X宽度方向)", 1, 20, 1, 1),
@@ -110,7 +104,6 @@ def main():
     fig.suptitle("314Ah 大电芯多维热模型对比 (1D/2D/3D, 1C 放电 10min)", fontsize=12)
     fig.tight_layout(rect=[0, 0, 1, 0.94])
     fig.savefig(os.path.join(os.path.dirname(os.path.abspath(__file__)), "result", "ecm_pack_314ah_3d_demo.png"), dpi=130)
-
 
 if __name__ == "__main__":
     main()

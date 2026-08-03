@@ -1,15 +1,8 @@
 # 电路层(MNA)单元测试
-import numpy as np
 import pytest
-
-import ecm_pack as ep
-from ecm_pack.circuit import Netlist, solve_circuit, setup_circuit, setup_two_group, setup_series_bypass
-
-
+from ecm_pack.circuit import Netlist, setup_circuit, setup_series_bypass, setup_two_group, solve_circuit
 def _nl(elements):
     return Netlist(elements)
-
-
 # ---------- 单芯电流控制 ----------
 def test_single_cell_current_control():
     """单芯 1A 放电：端电压 = E - I·R0。"""
@@ -22,8 +15,6 @@ def test_single_cell_current_control():
     Vn, Ib, It, Vt, Pt = solve_circuit(nl, current=1.0)
     assert abs(Vt[0] - (E - 1.0 * R0)) < 1e-9
     assert abs(It[0] - 1.0) < 1e-9
-
-
 # ---------- 并联环流(缺陷回归) ----------
 def test_parallel_circulation_direction():
     """两芯并联无负载：高 SoC(高电压)放电、低 SoC(低电压)被充电。"""
@@ -42,8 +33,6 @@ def test_parallel_circulation_direction():
     assert c1 < 0, "低电压芯应被充电"
     assert abs(c0 + c1) < 1e-9, "无负载时两芯电流应大小相等方向相反(纯环流)"
     assert abs(It[0]) < 1e-9
-
-
 # ---------- 串联电压叠加 ----------
 def test_series_voltage_sum():
     """2 串联同芯：端口电压 = 2·单芯电压，电流 = 负载电流。"""
@@ -57,8 +46,6 @@ def test_series_voltage_sum():
     ])
     Vn, Ib, It, Vt, Pt = solve_circuit(nl, current=2.0)
     assert abs(Vt[0] - (2 * E - 2.0 * (2 * R0))) < 1e-9
-
-
 # ---------- 功率控制(缺陷2回归) ----------
 def test_power_control_feasible():
     """可行功率：V·I = P，且取高电压物理根。"""
@@ -71,8 +58,6 @@ def test_power_control_feasible():
     Vn, Ib, It, Vt, Pt = solve_circuit(nl, power=50.0)
     assert abs(Vt[0] * It[0] - 50.0) < 1e-6
     assert Vt[0] > E / 2.0, "应取高电压(低电流)物理根"
-
-
 def test_power_control_infeasible_raises():
     """超出 Pmax 的功率需求应抛 ValueError。"""
     E, R0 = 3.9, 0.05  # Pmax ≈ 76W
@@ -83,8 +68,6 @@ def test_power_control_infeasible_raises():
     ])
     with pytest.raises(ValueError, match="最大可输出功率"):
         solve_circuit(nl, power=200.0)
-
-
 # ---------- R>0 校验(缺陷3回归) ----------
 def test_zero_resistance_rejected():
     """R=0 应在校验阶段抛 ValueError，不得静默产生 inf/nan。"""
@@ -95,8 +78,6 @@ def test_zero_resistance_rejected():
     ])
     with pytest.raises(ValueError, match="电阻必须为正"):
         solve_circuit(nl, current=1.0)
-
-
 def test_negative_resistance_rejected():
     nl = _nl([
         {"desc": "V0", "node1": 1, "node2": 2, "value": 3.0},
@@ -105,8 +86,6 @@ def test_negative_resistance_rejected():
     ])
     with pytest.raises(ValueError, match="电阻必须为正"):
         solve_circuit(nl, current=1.0)
-
-
 # ---------- setup_circuit 节点完整性 ----------
 def test_setup_circuit_cell_count():
     """setup_circuit(nS,nP) 应生成 nS*nP 个 V 元素与 R0 元素。"""
@@ -114,8 +93,6 @@ def test_setup_circuit_cell_count():
     assert len(v_rows) == 6
     assert len(ri_rows) == 6
     assert nl.n_cells == 6
-
-
 # ---------- setup_two_group active 对齐(缺陷回归) ----------
 def test_two_group_active_aligned_with_v_order():
     """active_par 必须与网表 V 元素顺序一致（每级先 A 后 B）。"""
@@ -131,8 +108,6 @@ def test_two_group_active_aligned_with_v_order():
     # active 与 V 元素电芯编号一致
     expected_active = [s if i == 0 else nS + s for s in range(nS) for i in (0, 1)]
     assert act_par == expected_active
-
-
 # ---------- setup_series_bypass ----------
 def test_series_bypass_removes_faulty_cell():
     """旁路后 V 元素数 = n-1，被旁路芯不在 active 中。"""

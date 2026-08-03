@@ -1,41 +1,37 @@
 # demo_8s_foam_thermal.py  ——  8S 大面背靠背串联 + 薄侧泡棉(不对称) + 三维非对称冷却仿真
-#
-# 物理布局（2026-07-28 用户修正）：
-#   环境: 25°C 强制自然对流
-#   8 颗 314Ah 电芯沿厚度方向(Y) 大面背靠背 1×8 串联，电芯间直接贴合(无泡棉)。
-#   薄侧: +X面、+Z面 = 泡棉(k=0.04,1mm) + 25°C空气强制对流；
-#         -X面、-Z面 = 直接25°C空气强制对流（无泡棉隔层）。
-#   顶部: 塑料片(k=0.2,d=0.2mm) + 25°C强制对流。
-#   底部(大面尾部): 25°C空气强制对流(非绝热)。
-#   无冷板。
-#
-# 三维热模型 StackThermal3D(thermal3d_stack.py):
-#   foam_faces=["x0","z0"]  — +X/+Z贴泡棉, -X/-Z直接空气
-#   k_top=0.2, d_top=2e-4   — 顶部塑料薄层串联对流
-#   h_top=h_side=50         — 25°C强制对流, T_amb=298.15K
-#   h_bottom=50              — 底部大面=空气强制对流(非绝热)
-#
-# 电气: 8S 串联, 总负载 157A 恒流放电（0.5C, 2h）。
-import sys, os
-import numpy as np
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import matplotlib.font_manager as fm
 
+# 物理布局（2026-07-28 用户修正）：
+# 环境: 25°C 强制自然对流
+# 8 颗 314Ah 电芯沿厚度方向(Y) 大面背靠背 1×8 串联，电芯间直接贴合(无泡棉)。
+# 薄侧: +X面、+Z面 = 泡棉(k=0.04,1mm) + 25°C空气强制对流；
+# -X面、-Z面 = 直接25°C空气强制对流（无泡棉隔层）。
+# 顶部: 塑料片(k=0.2,d=0.2mm) + 25°C强制对流。
+# 底部(大面尾部): 25°C空气强制对流(非绝热)。
+# 无冷板。
+
+# 三维热模型 StackThermal3D(thermal3d_stack.py):
+    # foam_faces=["x0","z0"]  — +X/+Z贴泡棉, -X/-Z直接空气
+    # k_top=0.2, d_top=2e-4   — 顶部塑料薄层串联对流
+    # h_top=h_side=50         — 25°C强制对流, T_amb=298.15K
+    # h_bottom=50              — 底部大面=空气强制对流(非绝热)
+
+# 电气: 8S 串联, 总负载 157A 恒流放电（0.5C, 2h）。
+import os
+import sys
+import matplotlib
+import numpy as np
+matplotlib.use("Agg")
+import matplotlib.font_manager as fm
+import matplotlib.pyplot as plt
 _CJK = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
 if os.path.exists(_CJK):
     fm.fontManager.addfont(_CJK)
     plt.rcParams["font.family"] = fm.FontProperties(fname=_CJK).get_name()
 plt.rcParams["axes.unicode_minus"] = False
-
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
 import ecm_pack as ep
 from ecm_pack.thermal3d_stack import StackThermal3D
-
 out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "result")
-
-
 def main():
     # ---- 工况参数 ----
     n_cells = 8
@@ -43,7 +39,6 @@ def main():
     t_total = 7200.0
     dt = 2.0
     n_steps = int(t_total / dt)
-
     # ---- 薄侧泡棉（仅 +X/+Z 面）----
     k_foam = 0.04
     d_foam = 0.001
@@ -123,8 +118,8 @@ def main():
     # snapshot (Pack may have continued past the last record before terminating)
     thermal.T = T_end.copy()
     print("\n" + "=" * 65)
-    print(f" 8S 大面背靠背 1×8 贴合(无泡棉) / 薄侧不对称(+X,+Z泡棉/-X,-Z直接空气)")
-    print(f" 25°C强制对流(h=50) 顶部塑料片 底部空气对流 0.5C=157A / 2h")
+    print(" 8S 大面背靠背 1×8 贴合(无泡棉) / 薄侧不对称(+X,+Z泡棉/-X,-Z直接空气)")
+    print(" 25°C强制对流(h=50) 顶部塑料片 底部空气对流 0.5C=157A / 2h")
     print("=" * 65)
     for idx in range(n_cells):
         if idx == 0:
@@ -168,7 +163,7 @@ def main():
     ax3.set(xticks=x_pos, xticklabels=[f"bat{i+1}" for i in range(n_cells)],
             ylabel="温升 ΔT [K]",
             title=f"末态各芯温升 整包dT={dT_pack:.4f}K")
-    for b, v in zip(bars, rise):
+    for b, v in zip(bars, rise, strict=True):
         ax3.text(b.get_x()+b.get_width()/2, b.get_height()+0.01,
                  f"{v:.2f}", ha="center", fontsize=7.5)
     fig2.tight_layout()
@@ -250,7 +245,6 @@ def main():
                header=header, fmt="%.6f")
     print(f"  数据: {csv_path}")
     print("=" * 65)
-
 
 if __name__ == "__main__":
     main()

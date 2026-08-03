@@ -1,52 +1,39 @@
 # demo.py  —�?  ecm_pack 功能演示
 # 覆盖�?1) ECM 模型定制  2) 自定义串并联拓扑  3) 热模型集�?  4) 自定义电芯间导热
-import sys, os
-import numpy as np
+import os
+import sys
 import matplotlib
+import numpy as np
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import matplotlib.font_manager as fm
-
+import matplotlib.pyplot as plt
 # 注册系统中文字体，避免图里中文显示为方块
 _CJK = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
 if os.path.exists(_CJK):
     fm.fontManager.addfont(_CJK)
     plt.rcParams["font.family"] = fm.FontProperties(fname=_CJK).get_name()
 plt.rcParams["axes.unicode_minus"] = False
-
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
 import ecm_pack as ep
-
-
 # ----------------------------------------------------------------------------
 # 0) 定义一个「工业风格」的可定�? ECM 电芯规格
-#    OCV 用曲线；R0/R1 �? (温度, 电流, SoC) 变化；含熵热 dU/dT�?1 �? RC�?
+# OCV 用曲线；R0/R1 �? (温度, 电流, SoC) 变化；含熵热 dU/dT�?1 �? RC�?
 # ----------------------------------------------------------------------------
 def make_ocv():
     s = np.linspace(0, 1, 101)
     v = 3.2 + 0.95 * s + 0.08 * np.sin(2 * np.pi * s) + 0.1 * s**2
     return ep.lookup_1d(s, v)
-
-
 def R0_of(Tdeg, I, soc):
     base = 0.01
     soc_term = 1.0 + 0.6 * (1.0 - soc)
     arr = np.exp(2000.0 * (1.0 / 298.15 - 1.0 / (Tdeg + 273.15)))
     return base * soc_term * arr + 1e-5 * abs(I)
-
-
 def R1_of(Tdeg, I, soc):
     return 0.5 * R0_of(Tdeg, I, soc)
-
-
 def C1_of(Tdeg, I, soc):
     return 6000.0
-
-
 def dUdT_of(Tdeg, soc):
     return -1e-4 + 2e-4 * soc
-
-
 def build_spec(soc_init=1.0, T_init=298.15):
     return ep.ECMCellSpec(
         capacity=5.0,
@@ -58,8 +45,6 @@ def build_spec(soc_init=1.0, T_init=298.15):
         soc_init=soc_init,
         T_init=T_init,
     )
-
-
 # ----------------------------------------------------------------------------
 # 1) ECM 模型定制：单芯验证（放电 SoC 下降、电压跌落、产热升温）
 # ----------------------------------------------------------------------------
@@ -75,8 +60,7 @@ def demo_single_cell():
     print("\n[单芯 ECM] 5A 放电 1h:")
     print(f"  SoC: {soc0:.3f} -> {cell.soc:.3f}  "
           f"电压: {v0:.3f} -> {cell.terminal_voltage(R0, I):.3f} V")
-
-
+    print(f"  温度: {T0:.2f} -> {cell.T:.2f} K  (温升 {cell.T - T0:+.2f} K)")
 # ----------------------------------------------------------------------------
 # 2) 自定义串并联拓扑�?2s2p，四芯初�? SoC 故意不均�? -> 验证并联不均�?
 # ----------------------------------------------------------------------------
@@ -97,13 +81,11 @@ def demo_2s2p():
     print(f"  并联不均�?(中途步 各串级内�?): "
           f"{np.round(np.abs(I[mid,1]-I[mid,0]),3)} / {np.round(np.abs(I[mid,3]-I[mid,2]),3)} A")
     return out
-
-
 # ----------------------------------------------------------------------------
 # 3) + 4) 热模型集�? �? 自定义电芯间导热
-#    �? 1s2p：两芯初�? SoC 不同 -> 产热不同�?
-#    场景 A：彼此绝热（仅对环境对流�?-> 两芯温度保持差异
-#    场景 B：两芯强耦合（自定义导热�?-> 温度被拉�?
+# �? 1s2p：两芯初�? SoC 不同 -> 产热不同�?
+# 场景 A：彼此绝热（仅对环境对流�?-> 两芯温度保持差异
+# 场景 B：两芯强耦合（自定义导热�?-> 温度被拉�?
 # ----------------------------------------------------------------------------
 def demo_thermal():
     def run(conduction, label):
@@ -116,11 +98,9 @@ def demo_thermal():
         out = pack.solve(dt=10.0, control=6.0, control_type="current", n_steps=360, record_every=10)
         print(f"\n[{label}] 末态温�? K: {np.round(out['Cell temperature [K]'][-1], 3)}")
         return out
-
     out_adiabatic = run(None, "�?-绝热(仅对�?)")
     out_coupled = run([(0, 1, 30.0)], "�?-自定义导�?(0-1 强耦合 G=30)")
     return out_adiabatic, out_coupled
-
 
 # ----------------------------------------------------------------------------
 # 5) 功率控制模式（不同控制方式）
@@ -137,8 +117,6 @@ def demo_power():
           f"I={out['Pack current [A]'][k]:.2f}A "
           f"P={out['Pack power [W]'][k]:.1f}W")
     return out
-
-
 # ----------------------------------------------------------------------------
 # 画图汇�?
 # ----------------------------------------------------------------------------
@@ -147,7 +125,6 @@ def plot_all(out_2s2p, out_adiabatic, out_coupled):
     t = out_2s2p["Time [s]"] / 60.0
     axs[0, 0].plot(t, out_2s2p["Pack terminal voltage [V]"], label="Pack V")
     axs[0, 0].set_title("2s2p 端口电压"); axs[0, 0].set_xlabel("t [min]"); axs[0, 0].set_ylabel("V"); axs[0, 0].legend()
-
     axs[0, 1].plot(t, out_2s2p["Cell SoC"], label=[f"cell{i}" for i in range(4)])
     axs[0, 1].set_title("各电�? SoC（不均衡放电�?"); axs[0, 1].set_xlabel("t [min]"); axs[0, 1].set_ylabel("SoC"); axs[0, 1].legend()
 
@@ -167,7 +144,6 @@ def plot_all(out_2s2p, out_adiabatic, out_coupled):
 
     fig.tight_layout()
     fig.savefig(os.path.join(os.path.dirname(os.path.abspath(__file__)), "result", "ecm_pack_demo.png"), dpi=130)
-
 
 if __name__ == "__main__":
     demo_single_cell()
