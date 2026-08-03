@@ -12,6 +12,7 @@
 # 只不过把黑盒 PyBaMM 模型替换成了我们可定制的 ECM 电芯。
 import logging
 import numpy as np
+from .aging import AgingParams, AgingState
 from .circuit import solve_circuit
 logger = logging.getLogger(__name__)
 class Pack:
@@ -93,7 +94,7 @@ class Pack:
             cell = self.cells[idx]
             self.netlist.df.at[self.v_rows[k], "value"] = cell.voltage_behind_R0()
             Td = cell.T - 273.15
-            R0_raw = cell.spec.R0(Td, 0.0, cell.soc)
+            R0_raw = cell.spec.R0(Td, 0.0, cell.soc) * cell.R0_growth
             Rc = float(cell.spec.R_contact(Td, 0.0, cell.soc))
             self.netlist.df.at[self.ri_rows[k], "value"] = R0_raw + Rc
         # 温度同步（新接入电芯的温度对齐到电芯对象）
@@ -105,7 +106,7 @@ class Pack:
         for k, idx in enumerate(self.active):
             cell = self.cells[idx]
             Td = cell.T - 273.15
-            R0_raw = cell.spec.R0(Td, I_prev[k], cell.soc)
+            R0_raw = cell.spec.R0(Td, I_prev[k], cell.soc) * cell.R0_growth
             Rc = float(cell.spec.R_contact(Td, I_prev[k], cell.soc))
             self.netlist.df.at[self.ri_rows[k], "value"] = R0_raw + Rc
 
@@ -118,6 +119,7 @@ class Pack:
         record_every=1,
         topology_events=None,
         switch_callback=None,
+        aging=False,
     ):
         """
         求解整包（支持运行中随时/定时切换拓扑）。
@@ -132,6 +134,14 @@ class Pack:
         switch_callback : callable, 可选
             事件驱动切换：每个时间步调用 callback(t, pack)，若返回
             (netlist, active) 则立即切换。用于「随时/按工况」切换。
+        aging : 老化/寿命计算开关（默认 False = 不计算，零开销）
+            False / None : 不计算老化（默认）
+            True         : 启用，使用默认 AgingParams
+            AgingParams  : 启用，使用指定参数（enabled 强制置 True）
+            dict         : 启用，dict -> AgingParams（如 {"Ea_cal": 30000.0}）
+            启用后：逐芯独立跑 Arrhenius 日历+循环老化，并回喂
+                sohc（容量保持率，影响 SoC 演化）与 R0_growth（内阻增长，
+                放大 R0 -> 欧姆热↑），输出追加 aging 字段。
 
         返回
         ----
@@ -195,6 +205,25 @@ class Pack:
             "Topology changes [s]": [],
         }
 
+        # 老化开关：False/None 关闭（默认，零开销）；True/AgingParams/dict 启用
+        aging_states = None
+        if aging not in (None, False):
+            if isinstance(aging, AgingParams):
+                params = aging
+            elif isinstance(aging, dict):
+                params = AgingParams(**aging)
+            else:
+                params = AgingParams()
+            params.enabled = True
+            aging_states = [AgingState(params) for _ in range(N)]
+            for c in self.cells:  # 同步回喂系数初始值
+                c.sohc = 1.0
+                c.R0_growth = 1.0
+            out["Cell capacity retention"] = np.full((n_rec, N), 1.0)
+            out["Cell resistance growth"] = np.full((n_rec, N), 1.0)
+            out["Aging Ah throughput"] = np.zeros((n_rec, N))
+            out["Aging Q loss"] = np.zeros((n_rec, N))
+
         rec_i = 0
 
         def record(t, V_node, I_term, V_term, P_term, I_cell, V_cell, soc, T, Rint, topo=False):
@@ -213,6 +242,15 @@ class Pack:
             out["Cell current abs [A]"][rec_i] = np.abs(I_cell)
             out["Cell temperature [K]"][rec_i] = T
             out["Cell internal resistance [Ohm]"][rec_i] = Rint
+            if aging_states is not None:
+                out["Cell capacity retention"][rec_i] = np.array(
+                    [c.sohc for c in self.cells])
+                out["Cell resistance growth"][rec_i] = np.array(
+                    [c.R0_growth for c in self.cells])
+                out["Aging Ah throughput"][rec_i] = np.array(
+                    [st.Ah_throughput for st in aging_states])
+                out["Aging Q loss"][rec_i] = np.array(
+                    [st.q_loss_total for st in aging_states])
             if topo:
                 out["Topology changes [s]"].append(t)
             rec_i += 1
@@ -332,6 +370,20 @@ class Pack:
                     self.cells[idx].T = self.thermal.T[idx]
                 T = self.thermal.T.copy()
 
+            # 老化推进（开关关闭时整段跳过，零开销）：
+            # 逐芯独立更新，温度用最新值；未接入电芯 I=0 仅日历老化继续。
+            if aging_states is not None:
+                for idx in range(N):
+                    cell = self.cells[idx]
+                    st = aging_states[idx]
+                    st.update(
+                        cell.T - 273.15, I_cell[idx], cell.soc, dt,
+                        cap_ref=cell.spec.capacity_fn(
+                            cell.T - 273.15, I_cell[idx], cell.soc),
+                    )
+                    cell.sohc = st.capacity_retention()
+                    cell.R0_growth = st.resistance_growth()
+
             # 写回网表供下一步求解
             for k, idx in enumerate(self.active):
                 self.netlist.df.at[self.v_rows[k], "value"] = self.cells[idx].voltage_behind_R0()
@@ -379,6 +431,6 @@ class Pack:
             V_cell = np.array([c.voltage_behind_R0() for c in self.cells])
             soc = np.array([c.soc for c in self.cells])
             T = np.array([c.T for c in self.cells])
-            Rint = np.array([c.spec.R0(c.T - 273.15, 0.0, c.soc) for c in self.cells])
+            Rint = np.array([c.spec.R0(c.T - 273.15, 0.0, c.soc) * c.R0_growth for c in self.cells])
         record(t, V_node, I_term, V_term, P_term, I_cell, V_cell, soc, T, Rint, topo)
 

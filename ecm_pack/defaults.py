@@ -9,7 +9,7 @@
 # X(宽度) 12 W/mK, Y(厚度) 0.7 W/mK, Z(高度) 11.6 W/mK
 # - 内阻 R0 = 0.4 mΩ, R1 = 0.4 mΩ, τ = R1·C1 = 100s
 import numpy as np
-from .data import as_callable, lookup_1d
+from .data import as_callable, lookup_1d, temp_aware
 from .ecm import ECMCellSpec
 def make_ocv_314ah():
     """314Ah 电芯 OCV 曲线（LFP 体系，平台电压特征）。"""
@@ -94,10 +94,74 @@ def build_r1_soc_t_table(soc_grid=None, tdeg_grid=None):
 def C1_314ah(Tdeg, I, soc):
     """极化电容 C1：使 τ = R1·C1 ≈ 100s。"""
     return C1_DEFAULT
+
+
+# =====================================================================
+# 经验式工厂：把「标量基值」升级为随温度/SoC 变化的经验函数。
+# 与 temp_aware() 配合实现「固定值 → 经验值变化；传入表 → 查表」双路径。
+# =====================================================================
+def r0_empirical(base):
+    """标量 R0 基值 -> (Tdeg, I, soc) 经验函数（Arrhenius 温度 + SoC 项 + 微小电流项）。
+    与模块级 R0_314ah 的解析式完全同构，只是基值可自定义。"""
+    base = float(base)
+
+    def _f(Tdeg, I=0.0, soc=1.0):
+        soc_term = 1.0 + 0.4 * (1.0 - soc)
+        arrhenius = np.exp(-2500.0 * (1.0 / 298.15 - 1.0 / (Tdeg + 273.15)))
+        return base * soc_term * arrhenius + 1e-7 * abs(I)
+
+    return _f
+
+
+def r1_empirical(base):
+    """标量 R1 基值 -> (Tdeg, I, soc) 经验函数（Arrhenius 温度 + SoC 项 + 微小电流项）。"""
+    base = float(base)
+
+    def _f(Tdeg, I=0.0, soc=1.0):
+        return base * (1.0 + 0.3 * (1.0 - soc)) * np.exp(
+            -2000.0 * (1.0 / 298.15 - 1.0 / (Tdeg + 273.15))
+        ) + 1e-7 * abs(I)
+
+    return _f
+
+
+def c1_empirical(base):
+    """标量 C1 基值 -> 常数函数（τ = R1·C1 保持恒定；温度依赖由查表路径覆盖）。"""
+    base = float(base)
+
+    def _f(Tdeg, I=0.0, soc=1.0):
+        return base
+
+    return _f
+
+
+def capacity_empirical(ref, k_low=0.008, k_high=0.001):
+    """标量容量基值 -> (Tdeg, I, soc) 经验函数：容量-温度分段线性修正。
+
+    C(T) = C_ref * (1 - k_low*(25-T))     T < 25°C （低温折损，k_low=0.8%/°C）
+    C(T) = C_ref * (1 + k_high*(T-25))    T >= 25°C（高温微增，k_high=0.1%/°C）
+
+    k_low / k_high 均为正数（每 °C 折损/增益率）。
+    含义：SoC 演化使用「当前温度下的容量」，低温放电时 SoC 下降更快。
+    25°C 处恒等于 C_ref，不影响参考工况标定。
+    """
+    ref = float(ref)
+
+    def _f(Tdeg, I=0.0, soc=1.0):
+        if Tdeg < 25.0:
+            return ref * (1.0 - k_low * (25.0 - Tdeg))
+        return ref * (1.0 + k_high * (Tdeg - 25.0))
+
+    return _f
+
+
 def dUdT_314ah(Tdeg, soc):
     """熵变系数（LFP 约为 -0.2 ~ +0.1 mV/K）。"""
     return -1e-4 + 3e-4 * soc
-def cell_314ah_spec(soc_init=0.5, T_init=298.15):
+
+
+def cell_314ah_spec(soc_init=0.5, T_init=298.15, R0=None, R1=None, C1=None,
+                    capacity=None, ocv=None, dUdT=None):
     """
     返回一个 314Ah 大电芯的 ECMCellSpec，已填入三维几何与热物性参数。
     几何（用户指定）：宽(X) 174mm × 厚(Y) 71.7mm × 高(Z) 207mm
@@ -107,18 +171,51 @@ def cell_314ah_spec(soc_init=0.5, T_init=298.15):
             X(宽度)=12, Y(厚度)=0.7, Z(高度)=11.6
     电气（用户指定）：
         R0 = 0.4 mΩ, R1 = 0.4 mΩ, τ = 100s
+
+    参数（电气性能「温度行为」双路径）：
+        R0 / R1 / C1 / capacity 均可为：
+          - None    -> 默认值（R0/R1=0.4mΩ，C1=τ/R1，capacity=314Ah）
+          - 标量    -> 套用经验公式（Arrhenius 温度修正 / 容量-温度折损）
+          - 表      -> 查表（2D 轴序 (SoC, T_degC)；3D 轴序 (SoC, T_degC, I)）
+          - 可调用  -> 原样（签名 (Tdeg, I, soc) -> 参数值）
+        R0/R1 为 None 且已设置模块级 R0_SOC_T_TABLE / R1_SOC_T_TABLE 时，
+        整体切换为查表（兼容旧机制）。
+        ocv  : (soc) -> V 的函数/表（默认 314Ah LFP 曲线）
+        dUdT : (Tdeg, soc) -> V/K 的函数（默认 LFP 近似式）
     """
+    # ---- R0：显式 > 全局表钩子 > 默认标量(0.4mΩ) ----
+    if R0 is None:
+        R0_val = R0_SOC_T_TABLE if R0_SOC_T_TABLE is not None else R0_DEFAULT
+    else:
+        R0_val = R0
+    r0_fn = temp_aware(R0_val, r0_empirical)
+
+    # ---- R1 同理 ----
+    if R1 is None:
+        R1_val = R1_SOC_T_TABLE if R1_SOC_T_TABLE is not None else R1_DEFAULT
+    else:
+        R1_val = R1
+    r1_fn = temp_aware(R1_val, r1_empirical)
+
+    # ---- C1：标量 -> 常数（τ 恒定）；表/函数 -> 原样 ----
+    c1_fn = temp_aware(C1_DEFAULT if C1 is None else C1, c1_empirical)
+
+    # ---- capacity：标量 -> 容量-温度经验修正；表/函数 -> 查表/原样 ----
+    cap_val = 314.0 if capacity is None else capacity
+
     return ECMCellSpec(
-        capacity=314.0,
-        ocv=make_ocv_314ah(),
-        R0=R0_314ah,
-        R=[R1_314ah],
-        C=[C1_314ah],
-        dUdT=dUdT_314ah,
+        capacity=cap_val,
+        ocv=make_ocv_314ah() if ocv is None else ocv,
+        R0=r0_fn,
+        R=[r1_fn],
+        C=[c1_fn],
+        dUdT=dUdT_314ah if dUdT is None else dUdT,
         soc_init=soc_init,
         T_init=T_init,
         Lx=LX_DEFAULT, Ly=LY_DEFAULT, Lz=LZ_DEFAULT,
         rho=RHO_DEFAULT, cp=CP_DEFAULT,
         k=K_DEFAULT,
+        empirical_factories={"R0": r0_empirical, "R": r1_empirical,
+                             "C": c1_empirical, "capacity": capacity_empirical},
     )
 

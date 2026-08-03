@@ -13,7 +13,7 @@
 # 因此无需刚性 ODE 求解器，整包仿真可固定大步长推进。
 import numpy as np
 
-from .data import as_callable
+from .data import as_callable, temp_aware
 
 
 def _thomas(main, lower, upper, rhs):
@@ -88,16 +88,31 @@ class ECMCellSpec:
         # 三维热模型几何参数（用于 Cell3DThermal）
         Lx=None, Ly=None, Lz=None,
         rho=None, cp=None, k=None,
+        empirical_factories=None,
     ):
-        self.capacity = float(capacity)
+        """
+        empirical_factories : dict, 可选
+            「标量 -> 经验公式」工厂映射，实现电气参数温度行为双路径：
+              {"R0": fn, "R": fn, "C": fn, "capacity": fn}
+            其中 fn 接受标量基值，返回 (Tdeg, I, soc) -> 参数值的函数。
+            语义：参数传标量时套用 fn 的经验公式；传表/函数时分别查表/原样。
+            默认 None：标量退化为常数（完全向后兼容）。
+        """
+        self._empirical_factories = dict(empirical_factories or {})
+        fac = self._empirical_factories
+        # 容量：原样保存（标量保持 float 语义），capacity_fn 统一 (Tdeg,I,soc)->Ah
+        self.capacity = capacity
+        self.capacity_fn = temp_aware(capacity, fac.get("capacity"))
         self.ocv = as_callable(ocv)
-        self.R0 = as_callable(R0)
-        R = R or []
-        C = C or []
+        self.R0 = temp_aware(R0, fac.get("R0"))
+        R = list(R) if R else []
+        C = list(C) if C else []
         if len(R) != len(C):
             raise ValueError("R 与 C 的 RC 支路数量必须一致")
-        self.R = [as_callable(r) for r in R]
-        self.C = [as_callable(c) for c in C]
+        rf = fac.get("R")
+        cf = fac.get("C")
+        self.R = [temp_aware(r, rf) for r in R]
+        self.C = [temp_aware(c, cf) for c in C]
         self.dUdT = as_callable(dUdT) if dUdT is not None else None
         self.R_contact = as_callable(R_contact)
         self.n_rc = len(R)
@@ -131,6 +146,7 @@ class ECMCellSpec:
             nx=self.nx,
             Lx=self.Lx, Ly=self.Ly, Lz=self.Lz,
             rho=self.rho, cp=self.cp, k=self.k,
+            empirical_factories=self._empirical_factories,
         )
         kwargs.update(overrides)
         return ECMCellSpec(**kwargs)
@@ -147,6 +163,10 @@ class ECMCell:
         self.soc = self.spec.soc_init
         self.T = self.spec.T_init
         self.v_rc = np.zeros(self.spec.n_rc)
+        # 老化回喂系数（默认 1.0 = 无老化）：Pack.solve(aging=...) 启用时由
+        # 逐芯老化状态机每步更新。sohc=容量保持率，R0_growth=内阻增长倍数。
+        self.sohc = 1.0
+        self.R0_growth = 1.0
         if self.spec.diffusion:
             self.z = np.ones(self.spec.nx) * self.soc
 
@@ -173,21 +193,23 @@ class ECMCell:
         其中稳态 v_inf = -I·R，对 dt 无条件稳定。
         """
         Td = self.T - 273.15
-        R0 = self.spec.R0(Td, I, self.soc)
+        R0 = self.spec.R0(Td, I, self.soc) * self.R0_growth
         Rs = np.array([r(Td, I, self.soc) for r in self.spec.R], dtype=float)
         Cs = np.array([c(Td, I, self.soc) for c in self.spec.C], dtype=float)
         tau = np.where(Rs * Cs > 0, Rs * Cs, 1e9)
         for k in range(self.spec.n_rc):
             v_inf = -I * Rs[k]
             self.v_rc[k] = v_inf + (self.v_rc[k] - v_inf) * np.exp(-dt / tau[k])
+        # 当前温度下的有效容量（容量-温度经验修正 × 老化容量保持率）
+        cap = self.spec.capacity_fn(Td, I, self.soc) * self.sohc
         # SoC：线性 ODE 的精确推进
-        self.soc += -I * dt / (self.spec.capacity * 3600.0)
+        self.soc += -I * dt / (cap * 3600.0)
         self.soc = min(max(self.soc, 0.0), 1.0)
         if self.spec.diffusion:
-            self._step_diffusion(I, dt)
+            self._step_diffusion(I, dt, cap)
         return R0
 
-    def _step_diffusion(self, I, dt):
+    def _step_diffusion(self, I, dt, cap):
         """分布 SoC 的 1D 扩散：隐式欧拉(后向欧拉) + Thomas 三对角求解，
         任意 dt 都稳定。边界：左 Neumann=0，右通量 = -tau_D·I/(Q·3600)。"""
         n = self.spec.nx
@@ -206,7 +228,7 @@ class ECMCell:
             lower[-1] = -2.0 * r   # 右边界行：系数作用在 z_{n-2}
             upper[0] = -2.0 * r    # 左边界行：系数作用在 z_1
         # 右边界通量：用虚节点 z_{n} = z_{n-2} + 2·dx·J，J = -tau_D·I/(Q·3600)
-        J = -tau_D * I / (self.spec.capacity * 3600.0)
+        J = -tau_D * I / (cap * 3600.0)
         # 右端项修正：把通量并入最后一个方程
         rhs = z.copy()
         rhs[-1] = z[-1] + 2.0 * r * dx * J

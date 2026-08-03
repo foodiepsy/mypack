@@ -8,6 +8,11 @@
     正确削弱（旧模型高估了边界冷却、夸大了芯间温差），基准需上移重校为：
         峰值温度 308.72 K，芯间温差 ΔT 2.039 K，末态端电压 17.62 V（不变）
     端电压与热模型无关，恒为 17.62 V。
+    2026-08-03 电气参数温度双路径需求变更：cell_314ah_spec 默认启用
+    capacity_empirical（容量-温度经验修正，25°C 恒等、高温微增），
+    高温下容量略增 -> 末态 SoC 略高 -> 峰值温度略降、端电压略升，
+    基线按新实现重标定为：
+        峰值温度 308.6991 K，芯间温差 ΔT 2.0322 K，末态端电压 17.7617 V
 
 运行较慢（3600 步隐式求解，约 20~40s），默认带 slow 标记：
 pytest tests/ -q                  # 包含本测试
@@ -17,8 +22,8 @@ import numpy as np
 import pytest
 import ecm_pack as ep
 from ecm_pack.thermal3d_stack import StackThermal3D
-# 黄金基准（K, K, V）与容差（S2 修复后半控制体导热热阻重校值）
-BASELINE = {"peak": 308.72, "dT": 2.039, "vt": 17.62}
+# 黄金基准（K, K, V）与容差（2026-08-03 容量温度双路径需求变更后重标定值）
+BASELINE = {"peak": 308.6991, "dT": 2.0322, "vt": 17.7617}
 TOL = {"peak": 0.01, "dT": 0.005, "vt": 0.01}
 def run_demo1(crate=0.5, t_total=7200.0, dt=2.0):
     """复现 demo1 的 8S 泡棉场景。返回 (peak, dT, vt)。"""
